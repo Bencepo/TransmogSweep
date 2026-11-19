@@ -4,7 +4,7 @@ Every transmog appearance on the auction house you have not collected yet, cheap
 
 **Website:** https://bencepo.github.io/transmogsweep/
 
-![TransmogSweep](media/logo.png)
+![TransmogSweep in the auction house](https://bencepo.github.io/media/transmogsweep/demo.gif)
 
 - **Its own auction house tab.** The tabs of Auctionator, VendorFloor and other addons stay where they are.
 - **Fast scan.** Asks the auction house for weapons and armor only, grouped by item: a few seconds, no 15-minute wait, repeat it any time.
