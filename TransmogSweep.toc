@@ -7,6 +7,7 @@
 ## X-Website: https://bencepo.github.io/transmogsweep/
 ## X-License: All Rights Reserved
 ## X-Curse-Project-ID: 1816987
+## X-Wago-ID: nGv92rKx
 ## SavedVariables: TransmogSweepDB
 ## IconTexture: Interface\AddOns\TransmogSweep\Icons\minimap
 ## AddonCompartmentFunc: TransmogSweep_OnCompartmentClick
