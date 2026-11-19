@@ -40,6 +40,7 @@ local defaults = {
 	aboveLevel = false,  -- hide items above your level
 	hideBought = true,   -- hide appearances bought until they are learned
 	slot = "all",
+	color = "any",
 	maxGold = 0,         -- 0: no price limit
 	search = "",
 }
@@ -335,6 +336,58 @@ local function SortView()
 	end)
 end
 
+-- WoW gives addons no colour of an item. The names do: "Crimson Silk Robe", "Black Mageweave
+-- Leggings". A colour matches when the name of the item, or of any item with the same look,
+-- holds one of its words.
+local COLORS = {
+	{ "any", L["Any colour"] },
+	{ "red", L["Red"], { "red", "crimson", "scarlet", "blood", "ruby", "flame", "fire", "burning", "cardinal" } },
+	{ "blue", L["Blue"], { "blue", "azure", "sapphire", "frost", "ice", "sky", "tide", "cobalt", "ocean" } },
+	{ "green", L["Green"], { "green", "emerald", "jade", "verdant", "forest", "moss", "nature" } },
+	{ "black", L["Black"], { "black", "shadow", "dark", "ebon", "night", "obsidian", "midnight", "onyx" } },
+	{ "white", L["White"], { "white", "silver", "pale", "frost", "moonlight", "ivory", "snow", "holy" } },
+	{ "gold", L["Gold & yellow"], { "gold", "golden", "yellow", "sun", "amber", "bronze", "brass" } },
+	{ "purple", L["Purple"], { "purple", "violet", "amethyst", "arcane", "twilight", "royal", "felcloth" } },
+	{ "brown", L["Brown"], { "brown", "leather", "hide", "earth", "russet", "tanned", "bark" } },
+	{ "gray", L["Gray"], { "gray", "grey", "iron", "steel", "stone", "ashen", "silver" } },
+}
+local lookNames = {} -- look -> the names of all items with it, lower case
+
+local function LookText(e)
+	local key = e.visual or e.source
+	local t = lookNames[key]
+	if t then return t end
+	local parts = { (e.name or ""):lower() }
+	if e.visual then
+		local ok, sources = pcall(TC.GetAllAppearanceSources, e.visual)
+		if ok and type(sources) == "table" then
+			for i, src in ipairs(sources) do
+				if i > 30 then break end
+				local ok2, info = pcall(TC.GetSourceInfo, src)
+				if ok2 and type(info) == "table" and info.name then parts[#parts + 1] = info.name:lower() end
+			end
+		end
+	end
+	t = table.concat(parts, " | ")
+	lookNames[key] = t
+	return t
+end
+
+local function ColorFits(e)
+	if not db.color or db.color == "any" then return true end
+	for _, c in ipairs(COLORS) do
+		if c[1] == db.color then
+			local text = " " .. LookText(e):gsub("[^%a]", " ") .. " "
+			for _, w in ipairs(c[3]) do
+				if text:find(" " .. w .. " ", 1, true) then return true end
+			end
+			return false
+		end
+	end
+	return true
+end
+ns.ColorFits = ColorFits
+
 local function BuildView()
 	wipe(view)
 	tipBudget = 300
@@ -343,12 +396,13 @@ local function BuildView()
 	local maxPrice = (db.maxGold or 0) * 10000
 	local best, sameLook = {}, {}
 	for _, e in pairs(items) do
-		local slot = SLOT_OF[e.inv]
+		local slot = not e.pending and SLOT_OF[e.inv]
 		if slot and (db.slot == "all" or slot == db.slot)
 			and (maxPrice <= 0 or e.price <= maxPrice)
 			and not (db.aboveLevel and (e.req or 0) > level)
 			and not db.hidden[HideKey(e)]
-			and (search == "" or (e.name or ""):lower():find(search, 1, true))
+			and (search == "" or (e.name or ""):lower():find(search, 1, true) or LookText(e):find(search, 1, true))
+			and ColorFits(e)
 			and not Bought(e)
 			and (not db.classOnly or ClassFits(e)) then
 			if db.unique then
@@ -475,7 +529,13 @@ local function FinishScan(failed)
 	items, listed, dataAt = scan.items, scan.listed, time()
 	scan.items, scan.pending, scan.seen, scan.verify = nil, nil, nil, nil
 	SaveScan()
-	Changed()
+	if buy.state or selected then
+		-- buying is under way: keep the list where it is
+		dirty = true
+		Redraw()
+	else
+		Changed()
+	end
 	SetStatus(L["Scan done: %d uncollected appearances among %d items of gear."]:format(#view, listed))
 end
 
@@ -528,8 +588,22 @@ local function ScanTick(now)
 		if still[1] and now - scan.loadT < 60 and now - scan.progressT < INFO_WAIT then
 			SetStatus(L["Loading item data (%d left) …"]:format(#still))
 		else
-			scan.phase, scan.verify, scan.vi = "verify", {}, 0
-			for _, e in pairs(scan.items) do scan.verify[#scan.verify + 1] = e end
+			-- Looks the tooltip already called known (or known through another item) stay
+			-- so: only the rest is asked. The list shows up right away and fills while
+			-- the check runs; rows still being checked are left out until they are done.
+			scan.phase, scan.verify, scan.vi, scan.cached = "verify", {}, 0, 0
+			for _, e in pairs(scan.items) do
+				local c = db.tipCache[e.id]
+				if c then
+					e.tip, scan.cached = c, scan.cached + 1
+				else
+					e.pending = true
+					scan.verify[#scan.verify + 1] = e
+				end
+			end
+			items, listed, dataAt = scan.items, scan.listed, time()
+			scan.shownAt = now
+			dirty = true
 		end
 	elseif scan.phase == "verify" then
 		-- ask the game's tooltip, about 8 ms per tick so the frame rate holds
@@ -538,9 +612,15 @@ local function ScanTick(now)
 		while scan.vi < #list and debugprofilestop() < stop do
 			scan.vi = scan.vi + 1
 			local e = list[scan.vi]
-			e.tip = TipState(e.id)
+			e.tip, e.pending = TipState(e.id), nil
 		end
-		SetStatus(L["Checking your collection (%d of %d) …"]:format(scan.vi, #list))
+		if not buy.state then SetStatus(L["Checking your collection (%d of %d) … you can start buying"]:format(scan.vi, #list)) end
+		if now - (scan.shownAt or 0) > 0.5 then
+			-- the list grows while the check runs, without moving the row being bought
+			scan.shownAt = now
+			dirty = true
+			Redraw()
+		end
 		if scan.vi >= #list then
 			-- no tooltip says "not collected" at all: the client shows no transmog lines
 			-- (e.g. transmog switched off for this character). Then the collection API decides.
@@ -549,9 +629,14 @@ local function ScanTick(now)
 				if e.tip == "unknown" or e.tip == "other" then said = said + 1 end
 			end
 			db.tipFallback = nil
-			if said == 0 and #list > 20 then
+			if said == 0 and #list > 20 and scan.cached == 0 then
 				for _, e in ipairs(list) do e.tip = nil end
 				db.tipFallback = true
+			else
+				-- remember the settled verdicts: a collected look never becomes uncollected
+				for _, e in ipairs(list) do
+					if e.tip == "known" or e.tip == "other" then db.tipCache[e.id] = e.tip end
+				end
 			end
 			FinishScan()
 		end
@@ -570,7 +655,7 @@ local function ItemKey(e, plain)
 end
 
 local function Check(e, pause, tried)
-	if not ahOpen or scan.active or buy.state == "buying" then return end
+	if not ahOpen or (scan.active and scan.phase ~= "verify") or buy.state == "buying" then return end
 	selected = e
 	wipe(buy)
 	buy.pause, buy.keepTried = pause, tried
@@ -724,7 +809,7 @@ local function Purchased(auctionID)
 	Redraw()
 	if nextOne then
 		scrollTo = true
-		Check(nextOne, 0.8)
+		Check(nextOne, 0.5)
 	end
 end
 
@@ -887,6 +972,7 @@ ns.SizeTab = SizeTab
 local BOTTOM = 40  -- room under the list
 local rowsShown = 12
 
+
 local function SlotName(key)
 	for _, s in ipairs(SLOTS) do
 		if s[1] == key then return s[2] end
@@ -894,25 +980,71 @@ local function SlotName(key)
 	return SLOTS[1][2]
 end
 
-local function ShowSlotMenu(owner)
-	if MenuUtil and MenuUtil.CreateContextMenu then
-		MenuUtil.CreateContextMenu(owner, function(_, root)
-			for _, s in ipairs(SLOTS) do
-				root:CreateRadio(s[2], function() return db.slot == s[1] end, function()
-					db.slot = s[1]
-					Changed()
-				end)
-			end
+-- A list to pick from under a button (our own: Blizzard's menu API did not open in Forever).
+local pick
+local function ShowPick(owner, list, current, onPick)
+	if not pick then
+		pick = CreateFrame("Frame", "TransmogSweepPick", UIParent, "BackdropTemplate")
+		pick:SetFrameStrata("FULLSCREEN_DIALOG")
+		pick:SetClampedToScreen(true)
+		pick:EnableMouse(true)
+		Flat(pick, C.bg, C.line)
+		pick.rows = {}
+		pick:SetScript("OnUpdate", function(self)
+			if not self:IsMouseOver(40, -40, -40, 40) and not (self.owner and self.owner:IsMouseOver()) then self:Hide() end
 		end)
-	else
-		-- no menu API: cycle through the slots
-		local i = 1
-		for n, s in ipairs(SLOTS) do
-			if s[1] == db.slot then i = n end
-		end
-		db.slot = SLOTS[i % #SLOTS + 1][1]
-		Changed()
+		tinsert(UISpecialFrames, "TransmogSweepPick")
 	end
+	if pick:IsShown() and pick.owner == owner then
+		pick:Hide()
+		return
+	end
+	pick.owner = owner
+	for i, item in ipairs(list) do
+		local b = pick.rows[i]
+		if not b then
+			b = CreateFrame("Button", nil, pick)
+			b:SetHeight(20)
+			b.hl = b:CreateTexture(nil, "BACKGROUND")
+			b.hl:SetAllPoints()
+			b.hl:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.25)
+			b.hl:Hide()
+			b.fs = b:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+			b.fs:SetPoint("LEFT", 10, 0)
+			b:SetScript("OnEnter", function(self) self.hl:Show() end)
+			b:SetScript("OnLeave", function(self) self.hl:Hide() end)
+			pick.rows[i] = b
+		end
+		b:ClearAllPoints()
+		b:SetPoint("TOPLEFT", 4, -4 - (i - 1) * 20)
+		b:SetPoint("TOPRIGHT", -4, -4 - (i - 1) * 20)
+		b.fs:SetText(item[2])
+		b.fs:SetTextColor(unpack(item[1] == current and C.accent or C.text))
+		b:SetScript("OnClick", function()
+			pick:Hide()
+			onPick(item[1])
+		end)
+		b:Show()
+	end
+	for i = #list + 1, #pick.rows do pick.rows[i]:Hide() end
+	pick:SetSize(math.max(owner:GetWidth(), 170), #list * 20 + 8)
+	pick:ClearAllPoints()
+	pick:SetPoint("TOPLEFT", owner, "BOTTOMLEFT", 0, -2)
+	pick:Show()
+end
+
+local function ShowSlotMenu(owner)
+	ShowPick(owner, SLOTS, db.slot, function(key)
+		db.slot = key
+		Changed()
+	end)
+end
+
+local function ColorName(key)
+	for _, c in ipairs(COLORS) do
+		if c[1] == key then return c[2] end
+	end
+	return COLORS[1][2]
 end
 
 local function HideAppearance(e)
@@ -1103,7 +1235,7 @@ local function UpdateBuyButton()
 		b:Disable()
 	else
 		b:SetText(selected and L["Check price"] or L["Start buying"])
-		b:SetEnabled((selected ~= nil or #view > 0) and not scan.active)
+		b:SetEnabled((selected ~= nil or #view > 0) and not (scan.active and scan.phase ~= "verify"))
 	end
 end
 
@@ -1165,6 +1297,7 @@ Redraw = function()
 	end
 	ui.empty:SetShown(next(items) ~= nil and #view == 0 and not scan.active)
 	ui.slot:SetText(SlotName(db.slot) .. "  |cffa335eev|r")
+	ui.color:SetText(ColorName(db.color or "any") .. "  |cffa335eev|r")
 	ui.unique:Sync()
 	ui.class:Sync()
 	UpdateScanButton()
@@ -1210,6 +1343,7 @@ local function BuildUI()
 
 	local search = CreateFrame("EditBox", nil, ui, "SearchBoxTemplate")
 	search:SetSize(170, 22)
+	Tip(search, L["Search"], L["Item names. Also finds a look through the names of all other items that share it."])
 	search:SetPoint("LEFT", ui.scan, "RIGHT", 14, 0)
 	search:SetAutoFocus(false)
 	search:SetText(db.search or "")
@@ -1267,7 +1401,16 @@ local function BuildUI()
 		L["Only armor types and weapons your class can wear. Warriors, paladins, hunters and shamans keep both armor types of their level range. Off: everything, e.g. to collect for your alts."])
 	ui.class:SetPoint("LEFT", ui.unique, "RIGHT", 8, 0)
 	ui.status = ui:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	ui.status:SetPoint("LEFT", ui.class, "RIGHT", 14, 0)
+	ui.color = FlatButton(ui, 140, 22)
+	ui.color:SetPoint("LEFT", ui.class, "RIGHT", 8, 0)
+	ui.color:SetScript("OnClick", function(self)
+		ShowPick(self, COLORS, db.color or "any", function(key)
+			db.color = key
+			Changed()
+		end)
+	end)
+	Tip(ui.color, L["Colour"], L["Looks whose item names suggest a colour, e.g. Crimson, Ebon or Azure. The names of all items with the same look count. WoW gives addons no colour data, so this is a good guess, not exact."])
+	ui.status:SetPoint("LEFT", ui.color, "RIGHT", 14, 0)
 	ui.status:SetPoint("RIGHT", ui, "RIGHT", -12, 0)
 	ui.status:SetJustifyH("LEFT")
 	ui.status:SetWordWrap(false)
@@ -1570,6 +1713,7 @@ function handlers.ADDON_LOADED(name)
 	end
 	db.hidden = db.hidden or {}
 	db.bought = db.bought or {}
+	db.tipCache = db.tipCache or {}  -- itemID -> "known" / "other": settled tooltip verdicts
 	db.lastFull = nil
 	local now = time()
 	for k, t in pairs(db.bought) do
@@ -1579,6 +1723,7 @@ function handlers.ADDON_LOADED(name)
 	local last = db.last
 	if last and last.v == 2 and last.items and now - (last.at or 0) < KEEP_SCAN then
 		items, listed, dataAt = last.items, last.listed or 0, last.at
+		for _, e in pairs(items) do e.pending = nil end
 	else
 		db.last = nil
 	end
@@ -1675,6 +1820,8 @@ local function CollectionChanged()
 end
 handlers.TRANSMOG_COLLECTION_UPDATED = CollectionChanged
 function handlers.TRANSMOG_COLLECTION_SOURCE_ADDED(source)
+	local learnedItem = source and items[source]
+	if db and learnedItem then db.tipCache[learnedItem.id] = "known" end
 	if db and source then db.bought[source] = nil end
 	local learned = source and items[source]
 	if learned then
