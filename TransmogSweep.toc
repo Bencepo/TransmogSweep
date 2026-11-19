@@ -1,0 +1,16 @@
+## Interface: 16001
+## Title: TransmogSweep
+## Notes: Every transmog appearance on the auction house you have not collected yet, cheapest first, as a tab in the auction house window. Buy them one after another with one button.
+## Notes-deDE: Alle Transmog-Optiken im Auktionshaus, die du noch nicht gesammelt hast, die günstigsten zuerst, als Tab im Auktionshausfenster. Mit einem Button eine nach der anderen kaufen.
+## Author: Bencepo
+## Version: @project-version@
+## X-Website: https://bencepo.github.io/transmogsweep/
+## X-License: All Rights Reserved
+## SavedVariables: TransmogSweepDB
+## IconTexture: Interface\AddOns\TransmogSweep\Icons\minimap
+## AddonCompartmentFunc: TransmogSweep_OnCompartmentClick
+
+Libs\LibStub\LibStub.lua
+Libs\LibAHTab\LibAHTab.lua
+Libs\BencepoUI\BencepoUI.lua
+TransmogSweep.lua

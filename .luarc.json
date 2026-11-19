@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime.version": "Lua 5.1",
+  "workspace.ignoreDir": [
+    "Libs",
+    ".release",
+    "tests",
+    "web",
+    ".github"
+  ],
+  "diagnostics.globals": [
+    "AuctionHouseFrame",
+    "ChatEdit_InsertLink",
+    "CreateSettingsButtonInitializer",
+    "DressUpItemLink",
+    "ERR_AUCTION_WON_S",
+    "issecretvalue",
+    "ITEM_QUALITY_COLORS",
+    "PanelTemplates_TabResize",
+    "RETRIEVING_ITEM_INFO",
+    "Settings",
+    "SettingsPanel",
+    "TooltipUtil",
+    "UIErrorsFrame",
+    "UISpecialFrames",
+    "WorldFrame"
+  ]
+}
