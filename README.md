@@ -27,12 +27,6 @@ All addons, live demos and the web pages: **https://bencepo.github.io**
 
 Like the addons? Support them on Ko-fi: **https://ko-fi.com/bencepo**
 
-- [VendorFloor](https://bencepo.github.io/vendorfloor/): auction house sniper for finds below vendor price, below disenchant value and profitable crafts.
-- [LevelTrail](https://bencepo.github.io/leveltrail/): records your leveling run; the page shows splits, XP sources, deaths, records and a share image.
-- [ProcFlare](https://bencepo.github.io/procflare/): big Clearcasting alert and small icons for weapon, trinket and talent procs, with melee and caster sound packs.
-- [SwingCast](https://bencepo.github.io/swingcast/): spell icon, cast time, latency zone and a swing timer on the standard cast bar.
-- [StatTrim](https://bencepo.github.io/stattrim/): hide, merge and reorder the stats in the character window.
-
 ## AI disclosure
 
 The code was written with the help of an AI assistant (Claude). Bencepo designed the features, tests everything in game and maintains the addon.
