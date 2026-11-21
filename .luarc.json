@@ -14,6 +14,9 @@
     "CreateSettingsButtonInitializer",
     "DressUpItemLink",
     "ERR_AUCTION_WON_S",
+    "ERR_LEARN_RECIPE_S",
+    "GetNumSkillLines",
+    "GetSkillLineInfo",
     "issecretvalue",
     "ITEM_QUALITY_COLORS",
     "PanelTemplates_TabResize",
@@ -23,6 +26,7 @@
     "TooltipUtil",
     "UIErrorsFrame",
     "UISpecialFrames",
+    "UNKNOWNOBJECT",
     "WorldFrame"
   ]
 }

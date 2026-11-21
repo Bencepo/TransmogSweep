@@ -17,6 +17,7 @@ TransmogSweep: auction house tab for WoW Forever (modern C_AuctionHouse and C_Tr
 - The tooltip line ("You haven't collected this appearance" / "...but not from this item") is the verdict shown to the player and wins over the API. Fallback to the API when no tooltip shows any such line (transmog switched off on the character).
 - Forever's auction house sends `AUCTION_HOUSE_SHOW_ERROR` 10 (DatabaseError, "Internal auction error") about 0.1 s after a buyout that then completes. It is hidden right after our own bid and only counts as a failure when no `AUCTION_HOUSE_PURCHASE_COMPLETED` follows within 2 s.
 - Item search results can be stale from the cache: read only after `ITEM_SEARCH_RESULTS_UPDATED` for our item key (or 2.5 s), and wait 0.8 s after a purchase before the next search.
+- Recipes (item class 9, subclass per profession): known comes from the tooltip line `ITEM_SPELL_KNOWN`, cached per character. In Forever's recipe tooltip "Requires <Profession> (n)" comes after the "Use:" line, and recipes that make an item show that item's tooltip in between (with its own "Requires Level"). So the last skill line counts, compared with the character's rank as well as by its red colour; "Requires Level" is ignored.
 - The list keeps the scanned price and a fixed tie order (price, name, source); after a purchase only that row is removed, no rebuild, so the next row stays under the cursor.
 
 ## Rules
