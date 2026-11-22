@@ -1,7 +1,6 @@
 ## Interface: 16001
 ## Title: TransmogSweep
 ## Notes: Every transmog appearance on the auction house you have not collected yet, cheapest first, as a tab in the auction house window. Also finds unlearned recipes for your professions. Buy them one after another with one button.
-## Notes-deDE: Alle Transmog-Optiken im Auktionshaus, die du noch nicht gesammelt hast, die günstigsten zuerst, als Tab im Auktionshausfenster. Findet auch noch nicht gelernte Rezepte für deine Berufe. Mit einem Button eins nach dem anderen kaufen.
 ## Author: Bencepo
 ## Version: @project-version@
 ## X-Website: https://bencepo.github.io/transmogsweep/

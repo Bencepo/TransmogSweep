@@ -5,7 +5,7 @@ TransmogSweep: auction house tab for WoW Forever (modern C_AuctionHouse and C_Tr
 ## Layout
 
 - `TransmogSweep.lua`: everything (scan, collected checks, list, buying, window, settings, events).
-- `Libs/BencepoUI`: shared settings-window toolkit (also in VendorFloor and ProcFlare). Bump the LibStub minor version on every change so the newest copy wins. `opts.bugUrl` gives the "Report a bug" button.
+- `Libs/BencepoUI`: shared settings-window toolkit of all Bencepo addons; `opts.bugUrl` gives the "Report a bug" button. It must be the same file in each addon (canonical: minor 3, Nov 2026). Change it in one repo, bump the LibStub minor, copy it to the others: two different copies with the same minor make the result depend on load order.
 - `Libs/LibAHTab`: the auction house tab (same library as Auctionator and VendorFloor).
 - `media/logo.png`: project logo for CurseForge, Wago and the website (not packaged).
 
@@ -22,7 +22,7 @@ TransmogSweep: auction house tab for WoW Forever (modern C_AuctionHouse and C_Tr
 
 ## Rules
 
-- UI texts in English. Buttons in the UI instead of chat commands. Settings in the BencepoUI window, not in Blizzard's options.
+- English only: UI texts and descriptions, no translations, no `Notes-xxXX` in the .toc. Buttons in the UI instead of chat commands. Settings in the BencepoUI window, not in Blizzard's options.
 - Every purchase needs a click (hardware event); never buy automatically.
 - CI runs luacheck and LuaLS with the WoW API annotations; LuaLS must report zero diagnostics or the release stops. New Blizzard globals go into `.luarc.json`.
 - Release: new version heading at the top of `CHANGELOG.md` (`## 1.0.1`), push to `main`; the workflow tags, builds and uploads to CurseForge and Wago (secrets `CF_API_KEY`, `WAGO_API_TOKEN`). The release reaches players right away, so test changes in the game before pushing.

@@ -243,14 +243,25 @@ local TIP_KNOWN = Global("TRANSMOGRIFY_TOOLTIP_APPEARANCE_KNOWN")
 ---@type GameTooltip
 local scanTip
 
-local function TipLines(itemID)
+local function IsRed(r, g, b) return r and r > 0.9 and g < 0.25 and b < 0.25 end
+
+-- The lines of an item's tooltip with their colour: { text, red }. From the tooltip data
+-- where the client has it, else from a hidden tooltip of our own.
+local function ScanTipLines(itemID)
 	local lines = {}
 	if C_TooltipInfo and C_TooltipInfo.GetItemByID then
 		local ok, data = pcall(C_TooltipInfo.GetItemByID, itemID)
 		if ok and data and data.lines then
 			for _, line in ipairs(data.lines) do
 				if TooltipUtil and TooltipUtil.SurfaceArgs and not line.leftText then pcall(TooltipUtil.SurfaceArgs, line) end
-				if line.leftText then lines[#lines + 1] = line.leftText end
+				if line.leftText then
+					local c = line.leftColor
+					local r, g, b
+					if type(c) == "table" then
+						if c.GetRGB then r, g, b = c:GetRGB() else r, g, b = c.r, c.g, c.b end
+					end
+					lines[#lines + 1] = { line.leftText, IsRed(r, g, b) }
+				end
 			end
 			if lines[1] then return lines end
 		end
@@ -264,10 +275,17 @@ local function TipLines(itemID)
 	for i = 1, scanTip:NumLines() do
 		local fs = _G["TransmogSweepScanTipTextLeft" .. i]
 		local text = fs and fs:GetText()
-		if text then lines[#lines + 1] = text end
+		if text then lines[#lines + 1] = { text, IsRed(fs:GetTextColor()) } end
 	end
 	scanTip:Hide()
 	return lines
+end
+
+-- the texts only
+local function TipLines(itemID)
+	local out = {}
+	for i, l in ipairs(ScanTipLines(itemID)) do out[i] = l[1] end
+	return out
 end
 
 local function TipState(itemID)
@@ -377,43 +395,6 @@ end
 -- "Requires " in the client's language, for lines the full pattern misses
 local SKILL_PREFIX = ((Global("ITEM_MIN_SKILL") or "Requires %s (%d)"):match("^(.-)%%") or "Requires ")
 
-local function IsRed(r, g, b) return r and r > 0.9 and g < 0.25 and b < 0.25 end
-
--- the lines of a recipe tooltip with their colour: { text, red }
-local function RecipeTipLines(itemID)
-	local lines = {}
-	if C_TooltipInfo and C_TooltipInfo.GetItemByID then
-		local ok, data = pcall(C_TooltipInfo.GetItemByID, itemID)
-		if ok and data and data.lines then
-			for _, line in ipairs(data.lines) do
-				if TooltipUtil and TooltipUtil.SurfaceArgs and not line.leftText then pcall(TooltipUtil.SurfaceArgs, line) end
-				if line.leftText then
-					local c = line.leftColor
-					local r, g, b
-					if type(c) == "table" then
-						if c.GetRGB then r, g, b = c:GetRGB() else r, g, b = c.r, c.g, c.b end
-					end
-					lines[#lines + 1] = { line.leftText, IsRed(r, g, b) }
-				end
-			end
-			if lines[1] then return lines end
-		end
-	end
-	if not scanTip then
-		scanTip = CreateFrame("GameTooltip", "TransmogSweepScanTip", nil, "GameTooltipTemplate") --[[@as GameTooltip]]
-	end
-	scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
-	scanTip:ClearLines()
-	scanTip:SetItemByID(itemID)
-	for i = 1, scanTip:NumLines() do
-		local fs = _G["TransmogSweepScanTipTextLeft" .. i]
-		local text = fs and fs:GetText()
-		if text then lines[#lines + 1] = { text, IsRed(fs:GetTextColor()) } end
-	end
-	scanTip:Hide()
-	return lines
-end
-
 -- What a recipe's tooltip says for this character. nil: data not loaded.
 -- known: "Already known". skill: required skill. canLearn: its requirements are not red.
 -- Recipes that make an item show that item's tooltip in between (with its own "Requires
@@ -435,7 +416,7 @@ do
 end
 
 local function RecipeState(itemID)
-	local lines = RecipeTipLines(itemID)
+	local lines = ScanTipLines(itemID)
 	local first = lines[1] and lines[1][1]
 	if not first or first == "" or first == RETRIEVING_ITEM_INFO then return nil end
 	local st = { known = false, canLearn = true }
@@ -1188,7 +1169,6 @@ local function FlatButton(parent, width, height, primary)
 		end
 		Flat(self, bg, border)
 		fs:SetTextColor(unpack(text))
-
 		self:SetAlpha(self:IsEnabled() and 1 or 0.45)
 		if primary then self:SetBackdropBorderColor(0.85, 0.55, 1, 1) end
 		if primary and self.hover and self:IsEnabled() then self:SetBackdropColor(0.74, 0.34, 1, 1) end
@@ -1253,7 +1233,6 @@ ns.SizeTab = SizeTab
 
 local BOTTOM = 48  -- room under the list
 local rowsShown = 12
-
 
 local function SlotName(key)
 	for _, s in ipairs(SLOTS) do
@@ -1412,7 +1391,7 @@ local function Diagnose(e)
 		add("cached known=%s learnableOnly=%s learnable=%s", tostring(RecipeKnownCache()[e.id]), tostring(db.learnableOnly), tostring(e.learnable))
 		add("parser 3  KNOWN=%s  SKILL=%s  PREFIX=%s", KNOWN_TEXT, SKILL_PATTERN, SKILL_PREFIX)
 		add("tooltip lines (red marked with !):")
-		for _, l in ipairs(RecipeTipLines(e.id)) do
+		for _, l in ipairs(ScanTipLines(e.id)) do
 			add("  %s[%s]", l[2] and "! " or "", (l[1]:gsub("|", "||"):gsub("\r", "\\r"):gsub("\n", "\\n")))
 		end
 		add("purchase log:")
@@ -2090,6 +2069,7 @@ ns.ShowError = function(msg)
 	if UIErrorsFrame and msg then UIErrorsFrame:AddMessage(msg, 1, 0.1, 0.1, 1) end
 end
 local function OnErrorShown(_, msg)
+	if issecretvalue and issecretvalue(msg) then return end -- lines the game hides from addons
 	if msg == Global("ERR_AUCTION_DATABASE_ERROR") and GetTime() < hideDbErrorUntil and buy.state == "buying" then
 		hideDbErrorUntil = 0
 		UIErrorsFrame:Clear()
@@ -2240,11 +2220,10 @@ end
 handlers.TRANSMOG_COLLECTION_UPDATED = CollectionChanged
 function handlers.TRANSMOG_COLLECTION_SOURCE_ADDED(source)
 	local mogItems = mode == "mog" and items or store.mog.items or {}
-	local learnedItem = source and mogItems[source]
-	if db and learnedItem then db.tipCache[learnedItem.id] = "known" end
-	if db and source then db.bought[source] = nil end
 	local learned = source and mogItems[source]
+	if db and source then db.bought[source] = nil end
 	if learned then
+		if db then db.tipCache[learned.id] = "known" end
 		learned.tip = "known"
 		for _, e in pairs(mogItems) do
 			if e ~= learned and e.visual and e.visual == learned.visual and e.tip == "unknown" then e.tip = "other" end
