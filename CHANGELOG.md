@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.2
 
 - Much faster and smoother scans and scrolling: idle `OnUpdate` sleeps outside active scans/purchases, tooltip scanning reads `C_TooltipInfo` directly without allocating temporary tables, verification runs in smooth 3.5 ms frame slices, search and max-gold inputs are debounced, scrolling only redraws visible rows, and already-collected items are pruned after verification to keep memory and SavedVariables small.
 - Fixed: recipes beyond #300 are no longer dropped after reload or skill updates (verified asynchronously without freezing); items without cached links no longer cause Lua errors on hover or buy; completionist mode (`unique = false`) no longer gets stuck on cached `"other"` verdicts; the list no longer shifts under the cursor while a purchase is under way; closing the auction house mid-scan no longer leaves items stuck pending.
