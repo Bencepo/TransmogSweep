@@ -62,10 +62,18 @@ local offset = 0
 local ahOpen = false
 local dirty = true
 local ui, settingsWin
+local events
 local known = { src = {}, vis = {} } -- collected status, cleared when the collection changes
 local statusText = ""
 local mode = "mog"      -- the list shown: "mog" appearances, "recipe" recipes
 local store = { mog = { items = {}, listed = 0 }, recipe = { items = {}, listed = 0 } }
+local ERR_DB_ERROR = Global("ERR_AUCTION_DATABASE_ERROR")
+
+local function SyncTicker()
+	local active = ahOpen and (scan.active or (buy.state ~= nil and buy.state ~= "ready"))
+	if events then events:SetShown(active) end
+	return active
+end
 
 local function Print(msg) print(PREFIX .. tostring(msg)) end
 
@@ -92,7 +100,7 @@ local function Ago(t)
 	return L["%d h ago"]:format(floor(s / 3600))
 end
 
-local Redraw
+local Redraw, UpdateBuyButton
 local function SetStatus(msg)
 	statusText = msg or ""
 	if ui then ui.status:SetText(statusText) end
@@ -117,6 +125,8 @@ local SLOTS = {
 	{ "hands", L["Hands"] }, { "waist", L["Waist"] }, { "legs", L["Legs"] }, { "feet", L["Feet"] },
 	{ "weapon", L["Weapons"] }, { "offhand", L["Off-hands & shields"] },
 }
+local SLOT_NAMES = {}
+for _, s in ipairs(SLOTS) do SLOT_NAMES[s[1]] = s[2] end
 
 -- Armor types a class wears (1 cloth, 2 leather, 3 mail, 4 plate): the classes that
 -- change at level 40 keep both, so you can collect for later.
@@ -146,12 +156,23 @@ local WEAPONS = {
 	DRUID = set(4, 5, 10, 13, 15),
 }
 
+local classCache = { class = select(2, UnitClass("player")), can = {} }
+
 local function ClassFits(e)
-	local _, class = UnitClass("player")
-	if TC.PlayerCanCollectSource then
-		local ok, hasData, can = pcall(TC.PlayerCanCollectSource, e.source)
-		if ok and hasData and not can then return false end
+	local class = classCache.class
+	if not class then
+		class = select(2, UnitClass("player"))
+		classCache.class = class
 	end
+	local can = classCache.can[e.source]
+	if can == nil and TC.PlayerCanCollectSource then
+		local ok, hasData, okCan = pcall(TC.PlayerCanCollectSource, e.source)
+		if ok and hasData then
+			can = okCan and true or false
+			classCache.can[e.source] = can
+		end
+	end
+	if can == false then return false end
 	if e.class == 4 then
 		-- cloaks, shirts, tabards, off-hand frills and cosmetics fit everyone
 		if e.inv == "INVTYPE_CLOAK" or e.sub == 0 or e.sub == 5 then return true end
@@ -242,25 +263,39 @@ local TIP_OTHER = Global("TRANSMOGRIFY_TOOLTIP_ITEM_UNKNOWN_APPEARANCE_KNOWN") o
 local TIP_KNOWN = Global("TRANSMOGRIFY_TOOLTIP_APPEARANCE_KNOWN")
 ---@type GameTooltip
 local scanTip
+local scanTipLeft = {}
 
-local function IsRed(r, g, b) return r and r > 0.9 and g < 0.25 and b < 0.25 end
+local function GetScanTipLeft(i)
+	local fs = scanTipLeft[i]
+	if not fs then
+		fs = _G["TransmogSweepScanTipTextLeft" .. i]
+		scanTipLeft[i] = fs
+	end
+	return fs
+end
 
--- The lines of an item's tooltip with their colour: { text, red }. From the tooltip data
--- where the client has it, else from a hidden tooltip of our own.
+local function IsRed(r, g, b) return (r and r > 0.9 and g < 0.25 and b < 0.25) and true or false end
+
+local function LineIsRed(c)
+	if type(c) ~= "table" then return false end
+	if c.GetRGB then return IsRed(c:GetRGB()) end
+	return IsRed(c.r, c.g, c.b)
+end
+
+-- The lines of an item's tooltip with their colour: { text, red }. Used by Diagnose.
 local function ScanTipLines(itemID)
 	local lines = {}
-	if C_TooltipInfo and C_TooltipInfo.GetItemByID then
-		local ok, data = pcall(C_TooltipInfo.GetItemByID, itemID)
-		if ok and data and data.lines then
-			for _, line in ipairs(data.lines) do
-				if TooltipUtil and TooltipUtil.SurfaceArgs and not line.leftText then pcall(TooltipUtil.SurfaceArgs, line) end
+	local getByID = C_TooltipInfo and C_TooltipInfo.GetItemByID
+	if getByID then
+		local ok, data = pcall(getByID, itemID)
+		local raw = ok and data and data.lines
+		if raw then
+			local surface = TooltipUtil and TooltipUtil.SurfaceArgs
+			for i = 1, #raw do
+				local line = raw[i]
+				if surface and not line.leftText then pcall(surface, line) end
 				if line.leftText then
-					local c = line.leftColor
-					local r, g, b
-					if type(c) == "table" then
-						if c.GetRGB then r, g, b = c:GetRGB() else r, g, b = c.r, c.g, c.b end
-					end
-					lines[#lines + 1] = { line.leftText, IsRed(r, g, b) }
+					lines[#lines + 1] = { line.leftText, LineIsRed(line.leftColor) }
 				end
 			end
 			if lines[1] then return lines end
@@ -273,7 +308,7 @@ local function ScanTipLines(itemID)
 	scanTip:ClearLines()
 	scanTip:SetItemByID(itemID)
 	for i = 1, scanTip:NumLines() do
-		local fs = _G["TransmogSweepScanTipTextLeft" .. i]
+		local fs = GetScanTipLeft(i)
 		local text = fs and fs:GetText()
 		if text then lines[#lines + 1] = { text, IsRed(fs:GetTextColor()) } end
 	end
@@ -281,44 +316,82 @@ local function ScanTipLines(itemID)
 	return lines
 end
 
--- the texts only
+-- the texts only (used by Diagnose)
 local function TipLines(itemID)
 	local out = {}
 	for i, l in ipairs(ScanTipLines(itemID)) do out[i] = l[1] end
 	return out
 end
 
+-- Read the tooltip verdict directly with early return and zero intermediate tables.
 local function TipState(itemID)
-	local lines = TipLines(itemID)
-	if not lines[1] or lines[1] == "" or lines[1] == RETRIEVING_ITEM_INFO then return nil end
-	for _, text in ipairs(lines) do
-		if text == TIP_UNKNOWN then return "unknown" end
-		if text == TIP_OTHER then return "other" end
-		if TIP_KNOWN and text == TIP_KNOWN then return "known" end
+	local getByID = C_TooltipInfo and C_TooltipInfo.GetItemByID
+	if getByID then
+		local ok, data = pcall(getByID, itemID)
+		local raw = ok and data and data.lines
+		if raw and raw[1] then
+			local surface = TooltipUtil and TooltipUtil.SurfaceArgs
+			local first
+			for i = 1, #raw do
+				local line = raw[i]
+				if surface and not line.leftText then pcall(surface, line) end
+				local text = line.leftText
+				if text then
+					if not first then
+						first = text
+						if first == "" or first == RETRIEVING_ITEM_INFO then return nil end
+					end
+					if text == TIP_UNKNOWN then return "unknown" end
+					if text == TIP_OTHER then return "other" end
+					if TIP_KNOWN and text == TIP_KNOWN then return "known" end
+				end
+			end
+			if first then return "known" end
+		end
 	end
+	if not scanTip then
+		scanTip = CreateFrame("GameTooltip", "TransmogSweepScanTip", nil, "GameTooltipTemplate") --[[@as GameTooltip]]
+	end
+	scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+	scanTip:ClearLines()
+	scanTip:SetItemByID(itemID)
+	local result, first
+	for i = 1, scanTip:NumLines() do
+		local fs = GetScanTipLeft(i)
+		local text = fs and fs:GetText()
+		if text then
+			if not first then
+				first = text
+				if first == "" or first == RETRIEVING_ITEM_INFO then break end
+			end
+			if text == TIP_UNKNOWN then
+				result = "unknown"
+				break
+			end
+			if text == TIP_OTHER then
+				result = "other"
+				break
+			end
+			if TIP_KNOWN and text == TIP_KNOWN then
+				result = "known"
+				break
+			end
+		end
+	end
+	scanTip:Hide()
+	if result then return result end
+	if not first or first == "" or first == RETRIEVING_ITEM_INFO then return nil end
 	return "known" -- loaded tooltip without a "not collected" line
-end
-
--- items whose tooltip was not ready during the scan are asked again while the list is
--- built, a few hundred per build so the frame rate holds
-local tipBudget = 0
-local function AskTip(e)
-	if e.tip == nil and tipBudget > 0 and not db.tipFallback then
-		tipBudget = tipBudget - 1
-		e.tip = TipState(e.id)
-	end
 end
 
 local function LookMissing(e)
 	if Collectable(e.source) == false then return false end
-	AskTip(e)
 	if e.tip then return e.tip == "unknown" end
 	return not VisualKnown(e)
 end
 
 local function SourceMissing(e)
 	if Collectable(e.source) == false then return false end
-	AskTip(e)
 	if e.tip then return e.tip ~= "known" end
 	return not SourceKnown(e.source)
 end
@@ -415,31 +488,87 @@ do
 	LEVEL_PATTERN = "^" .. fmt:gsub("([%(%)%.%+%-%*%?%[%]%^%$])", "%%%1"):gsub("%%d", "%%d+") .. "$"
 end
 
-local function RecipeState(itemID)
-	local lines = ScanTipLines(itemID)
-	local first = lines[1] and lines[1][1]
-	if not first or first == "" or first == RETRIEVING_ITEM_INFO then return nil end
-	local st = { known = false, canLearn = true }
-	local skillRed = false
-	local otherRed = false
-	for i, l in ipairs(lines) do
-		-- without colour codes, line breaks and spaces at either end
-		local text = l[1]:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("^%s+", ""):gsub("%s+$", "")
-		local red = l[2]
-		if text == KNOWN_TEXT then
-			st.known = true
-		elseif i > 1 and not text:find(LEVEL_PATTERN) then
-			local _, skill = text:match(SKILL_PATTERN)
-			if not skill and text:find(SKILL_PREFIX, 1, true) == 1 then skill = text:match("%((%d+)%)$") end
-			if skill then
-				st.skill, skillRed = tonumber(skill), red -- the last one wins: the recipe's own
-			elseif red then
-				for _, pat in ipairs(REQ_PATTERNS) do
-					if text:find(pat) then otherRed = true end
-				end
+local function ParseRecipeLine(rawText, red, lineIdx, st)
+	local text = rawText
+	if text:find("|", 1, true) then
+		text = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+	end
+	if text:find("^%s") or text:find("%s$") then
+		text = text:gsub("^%s+", ""):gsub("%s+$", "")
+	end
+	if text == KNOWN_TEXT then
+		st.known = true
+	elseif lineIdx > 1 and not text:find(LEVEL_PATTERN) then
+		local _, skill = text:match(SKILL_PATTERN)
+		if not skill and text:find(SKILL_PREFIX, 1, true) == 1 then skill = text:match("%((%d+)%)$") end
+		if skill then
+			st.skill = tonumber(skill)
+			return red, nil -- the last one wins: the recipe's own
+		elseif red then
+			for j = 1, #REQ_PATTERNS do
+				if text:find(REQ_PATTERNS[j]) then return nil, true end
 			end
 		end
 	end
+	return nil, nil
+end
+
+local function RecipeState(itemID)
+	local st
+	local skillRed, otherRed = false, false
+	local lineIdx = 0
+	local getByID = C_TooltipInfo and C_TooltipInfo.GetItemByID
+	if getByID then
+		local ok, data = pcall(getByID, itemID)
+		local raw = ok and data and data.lines
+		if raw and raw[1] then
+			local surface = TooltipUtil and TooltipUtil.SurfaceArgs
+			for i = 1, #raw do
+				local line = raw[i]
+				if surface and not line.leftText then pcall(surface, line) end
+				local text = line.leftText
+				if text then
+					lineIdx = lineIdx + 1
+					if lineIdx == 1 then
+						if text == "" or text == RETRIEVING_ITEM_INFO then return nil end
+						st = { known = false, canLearn = true }
+					end
+					local sr, orr = ParseRecipeLine(text, lineIdx > 1 and LineIsRed(line.leftColor) or false, lineIdx, st)
+					if sr ~= nil then skillRed = sr end
+					if orr then otherRed = true end
+				end
+			end
+			if st then
+				st.canLearn = not skillRed and not otherRed
+				return st
+			end
+		end
+	end
+	if not scanTip then
+		scanTip = CreateFrame("GameTooltip", "TransmogSweepScanTip", nil, "GameTooltipTemplate") --[[@as GameTooltip]]
+	end
+	scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+	scanTip:ClearLines()
+	scanTip:SetItemByID(itemID)
+	for i = 1, scanTip:NumLines() do
+		local fs = GetScanTipLeft(i)
+		local text = fs and fs:GetText()
+		if text then
+			lineIdx = lineIdx + 1
+			if lineIdx == 1 then
+				if text == "" or text == RETRIEVING_ITEM_INFO then
+					st = nil
+					break
+				end
+				st = { known = false, canLearn = true }
+			end
+			local sr, orr = ParseRecipeLine(text, lineIdx > 1 and IsRed(fs:GetTextColor()) or false, lineIdx, st)
+			if sr ~= nil then skillRed = sr end
+			if orr then otherRed = true end
+		end
+	end
+	scanTip:Hide()
+	if not st then return nil end
 	st.canLearn = not skillRed and not otherRed
 	return st
 end
@@ -455,7 +584,7 @@ end
 ---------------------------------------------------------------------------
 
 local SORT_FIELDS = {
-	name = function(e) return (e.name or ""):lower() end,
+	name = function(e) return e.nameLower or (e.name or ""):lower() end,
 	slot = function(e) return e.inv or e.profName or "" end,
 	type = function(e)
 		if e.kind == "recipe" then return e.rs and e.rs.skill or 0 end
@@ -498,13 +627,23 @@ local COLORS = {
 	{ "brown", L["Brown"], { "brown", "leather", "hide", "earth", "russet", "tanned", "bark" } },
 	{ "gray", L["Gray"], { "gray", "grey", "iron", "steel", "stone", "ashen", "silver" } },
 }
-local lookNames = {} -- look -> the names of all items with it, lower case
+local COLORS_BY_KEY = {}
+local COLOR_NAMES = {}
+for _, c in ipairs(COLORS) do
+	COLOR_NAMES[c[1]] = c[2]
+	if c[3] then
+		local padded = {}
+		for i, w in ipairs(c[3]) do padded[i] = " " .. w .. " " end
+		COLORS_BY_KEY[c[1]] = padded
+	end
+end
+local lookNames = {} -- look -> normalized " word1 word2 " of all items sharing the look
 
 local function LookText(e)
 	local key = e.visual or e.source
 	local t = lookNames[key]
 	if t then return t end
-	local parts = { (e.name or ""):lower() }
+	local parts = { e.nameLower or (e.name or ""):lower() }
 	if e.visual then
 		local ok, sources = pcall(TC.GetAllAppearanceSources, e.visual)
 		if ok and type(sources) == "table" then
@@ -515,31 +654,127 @@ local function LookText(e)
 			end
 		end
 	end
-	t = table.concat(parts, " | ")
+	t = " " .. table.concat(parts, " "):gsub("[^%a]", " ") .. " "
 	lookNames[key] = t
 	return t
 end
 
 local function ColorFits(e)
-	if not db.color or db.color == "any" then return true end
-	for _, c in ipairs(COLORS) do
-		if c[1] == db.color then
-			local text = " " .. LookText(e):gsub("[^%a]", " ") .. " "
-			for _, w in ipairs(c[3]) do
-				if text:find(" " .. w .. " ", 1, true) then return true end
-			end
-			return false
-		end
+	local words = db.color and COLORS_BY_KEY[db.color]
+	if not words then return true end
+	local text = LookText(e)
+	for i = 1, #words do
+		if text:find(words[i], 1, true) then return true end
 	end
-	return true
+	return false
 end
 ns.ColorFits = ColorFits
 
-local function BuildRecipeView()
+-- Frame-budgeted async verification for entries missing tooltip verdicts (e.g. recipes after
+-- login/skill gain, or items whose tooltip was still loading during the scan).
+local asyncVerify = { active = false, mode = nil, list = {}, failed = {}, i = 0, lastRedraw = 0, hadNil = false, retryAfter = 0, setStatus = false }
+
+function asyncVerify.Cancel()
+	asyncVerify.active = false
+	asyncVerify.mode = nil
+	asyncVerify.i = 0
+	asyncVerify.hadNil = false
+	asyncVerify.setStatus = false
+	wipe(asyncVerify.list)
+end
+
+function asyncVerify.Tick()
+	if not asyncVerify.active then return end
+	if scan.active or not ahOpen or asyncVerify.mode ~= mode or not (ui and ui:IsShown()) then
+		asyncVerify.Cancel()
+		dirty = true
+		return
+	end
+	local list = asyncVerify.list
+	local failed = asyncVerify.failed
+	local isRecipe = asyncVerify.mode == "recipe"
+	local knownCache = isRecipe and RecipeKnownCache() or nil
+	local stop = debugprofilestop() + 3.5
+	local reqLoad = C_Item and C_Item.RequestLoadItemDataByID
+	while asyncVerify.i < #list and debugprofilestop() < stop do
+		asyncVerify.i = asyncVerify.i + 1
+		local e = list[asyncVerify.i]
+		if isRecipe then
+			if e.rs == nil then
+				local rs = RecipeState(e.id)
+				if rs then
+					e.rs = rs
+					failed[e.id] = nil
+					if rs.known and knownCache then
+						knownCache[e.id] = true
+						items[e.source] = nil
+					end
+				else
+					failed[e.id] = (failed[e.id] or 0) + 1
+					asyncVerify.hadNil = true
+					if reqLoad then reqLoad(e.id) end
+				end
+			end
+		else
+			if e.tip == nil and not db.tipFallback then
+				local tip = TipState(e.id)
+				if tip then
+					e.tip = tip
+					failed[e.id] = nil
+					if tip == "known" then
+						db.tipCache[e.id] = "known"
+						items[e.source] = nil
+					end
+				else
+					failed[e.id] = (failed[e.id] or 0) + 1
+					asyncVerify.hadNil = true
+					if reqLoad then reqLoad(e.id) end
+				end
+			end
+		end
+	end
+	local now = GetTime()
+	if asyncVerify.i < #list then
+		if not buy.state then
+			asyncVerify.setStatus = true
+			SetStatus((isRecipe and L["Checking your recipes (%d of %d) …"]
+				or L["Checking your collection (%d of %d) …"]):format(asyncVerify.i, #list))
+		end
+		if now - asyncVerify.lastRedraw > 0.35 then
+			asyncVerify.lastRedraw = now
+			dirty = true
+			if not buy.state and Redraw then Redraw() end
+		end
+		C_Timer.After(0, asyncVerify.Tick)
+	else
+		local hadNil = asyncVerify.hadNil
+		local clearStatus = asyncVerify.setStatus
+		asyncVerify.Cancel()
+		asyncVerify.retryAfter = hadNil and (now + 0.35) or 0
+		dirty = true
+		if clearStatus and not buy.state then SetStatus("") end
+		if not buy.state and Redraw then Redraw() end
+	end
+end
+
+function asyncVerify.Start()
+	if asyncVerify.active or not asyncVerify.list[1] or scan.active or not ahOpen then return end
+	asyncVerify.active = true
+	asyncVerify.mode = mode
+	asyncVerify.i = 0
+	asyncVerify.lastRedraw = GetTime()
+	asyncVerify.hadNil = false
+	asyncVerify.setStatus = false
+	local delay = max(0, (asyncVerify.retryAfter or 0) - GetTime())
+	C_Timer.After(delay, asyncVerify.Tick)
+end
+
+local function BuildRecipeView(queue)
 	local mine = MyProfessions()
 	local search = (db.search or ""):lower()
 	local maxPrice = (db.maxGold or 0) * 10000
 	local knownCache = RecipeKnownCache()
+	local failed = asyncVerify.failed
 	for _, e in pairs(items) do
 		local prof = mine[e.sub]
 		if prof and not e.pending
@@ -547,57 +782,74 @@ local function BuildRecipeView()
 			and (maxPrice <= 0 or e.price <= maxPrice)
 			and not db.hidden[HideKey(e)]
 			and not knownCache[e.id]
-			and (search == "" or (e.name or ""):lower():find(search, 1, true))
+			and (search == "" or (e.nameLower or (e.name or ""):lower()):find(search, 1, true))
 			and not Bought(e) then
 			e.profName = prof.name
-			if e.rs == nil and tipBudget > 0 then
-				tipBudget = tipBudget - 1
-				e.rs = RecipeState(e.id)
-			end
 			local rs = e.rs
-			-- the tooltip's red colour, and the skill compared with your own rank
-			e.learnable = rs and rs.canLearn and not (rs.skill and (prof.rank or 0) < rs.skill) or false
-			if rs and rs.known then
-				knownCache[e.id] = true
-			elseif rs and (e.learnable or not db.learnableOnly) then
-				view[#view + 1] = e
+			if rs == nil then
+				if queue and (failed[e.id] or 0) < 3 then queue[#queue + 1] = e end
+			else
+				-- the tooltip's red colour, and the skill compared with your own rank
+				e.learnable = rs.canLearn and not (rs.skill and (prof.rank or 0) < rs.skill) or false
+				if rs.known then
+					knownCache[e.id] = true
+				elseif e.learnable or not db.learnableOnly then
+					view[#view + 1] = e
+				end
 			end
 		end
 	end
 end
 
+local viewScratch = { best = {}, same = {} }
+
 local function BuildView()
 	wipe(view)
-	tipBudget = 300
+	local queue = (not scan.active and not asyncVerify.active) and asyncVerify.list or nil
+	if queue then wipe(queue) end
 	if mode == "recipe" then
-		BuildRecipeView()
+		BuildRecipeView(queue)
 		SortView()
 		dirty = false
+		if queue and queue[1] then asyncVerify.Start() end
 		return
 	end
 	local level = UnitLevel("player") or 0
 	local search = (db.search or ""):lower()
+	local searchDeep = #search >= 2
 	local maxPrice = (db.maxGold or 0) * 10000
-	local best, sameLook = {}, {}
+	local wantTip = queue and not db.tipFallback
+	local failed = asyncVerify.failed
+	local best, sameLook = viewScratch.best, viewScratch.same
+	wipe(best)
+	wipe(sameLook)
 	for _, e in pairs(items) do
 		local slot = not e.pending and SLOT_OF[e.inv]
 		if slot and (db.slot == "all" or slot == db.slot)
 			and (maxPrice <= 0 or e.price <= maxPrice)
-			and not (db.aboveLevel and (e.req or 0) > level)
-			and not db.hidden[HideKey(e)]
-			and (search == "" or (e.name or ""):lower():find(search, 1, true) or LookText(e):find(search, 1, true))
-			and ColorFits(e)
-			and not Bought(e)
-			and (not db.classOnly or ClassFits(e)) then
-			if db.unique then
-				if LookMissing(e) then
-					local k = HideKey(e)
-					sameLook[k] = (sameLook[k] or 0) + 1
-					if not best[k] or e.price < best[k].price then best[k] = e end
+			and not (db.aboveLevel and (e.req or 0) > level) then
+			local hk = HideKey(e)
+			if not db.hidden[hk]
+				and not Bought(e)
+				and (not db.classOnly or ClassFits(e)) then
+				if wantTip and e.tip == nil and (failed[e.id] or 0) < 3 then
+					queue[#queue + 1] = e
 				end
-			elseif SourceMissing(e) then
-				e.alts = nil
-				view[#view + 1] = e
+				if db.unique then
+					if LookMissing(e)
+						and (search == "" or (e.nameLower or (e.name or ""):lower()):find(search, 1, true)
+							or (searchDeep and LookText(e):find(search, 1, true)))
+						and ColorFits(e) then
+						sameLook[hk] = (sameLook[hk] or 0) + 1
+						if not best[hk] or e.price < best[hk].price then best[hk] = e end
+					end
+				elseif SourceMissing(e)
+					and (search == "" or (e.nameLower or (e.name or ""):lower()):find(search, 1, true)
+						or (searchDeep and LookText(e):find(search, 1, true)))
+					and ColorFits(e) then
+					e.alts = nil
+					view[#view + 1] = e
+				end
 			end
 		end
 	end
@@ -605,11 +857,18 @@ local function BuildView()
 		e.alts = sameLook[k] - 1
 		view[#view + 1] = e
 	end
+	wipe(best)
+	wipe(sameLook)
 	SortView()
 	dirty = false
+	if queue and queue[1] then asyncVerify.Start() end
 end
 
 local function Changed()
+	if buy.state and buy.state ~= "buying" then
+		wipe(buy)
+		SyncTicker()
+	end
 	dirty = true
 	offset = 0
 	if Redraw then Redraw() end
@@ -640,18 +899,18 @@ local function KeyString(key)
 	return (key.itemID or 0) .. ":" .. (key.itemLevel or 0) .. ":" .. (key.itemSuffix or 0)
 end
 
--- The appearance source of an auction key: from the auction house's own item data (it
--- knows random suffixes), else from the item.
+-- The appearance source and visual ID of an auction key: from the item, else from
+-- the auction house's own item data (random suffixes).
 local function SourceOf(key, info)
-	local _, source = TC.GetItemInfo(key.itemID)
-	if source then return source end
+	local visual, source = TC.GetItemInfo(key.itemID)
+	if source then return source, visual end
 	local link = info and info.appearanceLink
 	local id = link and tonumber(link:match("transmogappearance:(%d+)"))
 	if id and id > 0 then
 		local ok, sInfo = pcall(TC.GetSourceInfo, id)
-		if ok and type(sInfo) == "table" and sInfo.itemID == key.itemID then return id end
+		if ok and type(sInfo) == "table" and sInfo.itemID == key.itemID then return id, sInfo.visualID end
 	end
-	return nil
+	return nil, nil
 end
 
 -- One recipe of the browse results. Returns false while its item data is still loading.
@@ -663,14 +922,16 @@ local function RecordRecipe(result)
 	local info = AH.GetItemKeyInfo and AH.GetItemKeyInfo(key)
 	if not info then return false end
 	local name, link, q, _, req, _, _, _, _, tex = GetItemInfo(key.itemID)
-	if not name then return false end
+	if not name or not link then return false end
 	local n = result.totalQuantity or 1
 	scan.listed = scan.listed + n
 	local id = "r" .. key.itemID
 	local e = scan.items[id]
 	if not e then
+		local itemName = info.itemName or name
 		e = { kind = "recipe", source = id, id = key.itemID, key = key, link = link,
-			name = info.itemName or name, icon = info.iconFileID or tex or icon, quality = q or info.quality,
+			name = itemName, nameLower = itemName and itemName:lower() or "",
+			icon = info.iconFileID or tex or icon, quality = q or info.quality,
 			class = classID, sub = subID, req = req or 0, price = price, n = 0 }
 		scan.items[id] = e
 	end
@@ -688,7 +949,7 @@ local function Record(result)
 	if (classID ~= 2 and classID ~= 4) or not SLOT_OF[inv] then return true end
 	local info = AH.GetItemKeyInfo and AH.GetItemKeyInfo(key)
 	if not info then return false end
-	local source = SourceOf(key, info)
+	local source, visual = SourceOf(key, info)
 	if not source then
 		if not GetItemInfo(key.itemID) then return false end
 		return true -- no appearance of its own
@@ -696,16 +957,21 @@ local function Record(result)
 	local can = Collectable(source)
 	if can == nil then return false end -- still loading
 	if not can then return true end    -- nothing to collect for you
-	local sInfo = select(2, pcall(TC.GetSourceInfo, source))
-	local visual = type(sInfo) == "table" and sInfo.visualID or select(1, TC.GetItemInfo(key.itemID))
 	local _, link, q, _, req, _, _, _, _, tex = GetItemInfo(key.itemID)
+	if not link then return false end
+	if not visual then
+		local ok, sInfo = pcall(TC.GetSourceInfo, source)
+		if ok and type(sInfo) == "table" then visual = sInfo.visualID end
+	end
 	req = (AH.GetItemKeyRequiredLevel and AH.GetItemKeyRequiredLevel(key)) or req or 0
 	local n = result.totalQuantity or 1
 	scan.listed = scan.listed + n
 	local e = scan.items[source]
 	if not e then
+		local itemName = info.itemName or link:match("%[(.-)%]")
 		e = { source = source, visual = visual, id = key.itemID, key = key, link = link,
-			name = info.itemName or (link and link:match("%[(.-)%]")), icon = info.iconFileID or tex or icon,
+			name = itemName, nameLower = itemName and itemName:lower() or "",
+			icon = info.iconFileID or tex or icon,
 			quality = q or info.quality, inv = inv, class = classID, sub = subID, subName = subName,
 			req = req, price = price, n = 0 }
 		scan.items[source] = e
@@ -740,25 +1006,27 @@ end
 
 local function FinishScan(failed)
 	scan.active = false
+	SyncTicker()
 	if failed then
+		scan.items, scan.pending, scan.scratch, scan.seen, scan.verify = nil, nil, nil, nil, nil
 		SetStatus(L["The auction house did not answer. Try again in a moment."])
 		Redraw()
 		return
 	end
 	items, listed, dataAt = scan.items, scan.listed, time()
-	scan.items, scan.pending, scan.seen, scan.verify = nil, nil, nil, nil
+	scan.items, scan.pending, scan.scratch, scan.seen, scan.verify = nil, nil, nil, nil, nil
 	SaveScan()
-	if buy.state or selected then
-		-- buying is under way: keep the list where it is
+	if buy.state then
+		-- buying is under way: keep the list where it is until buying finishes
 		dirty = true
 		Redraw()
 	else
 		Changed()
-	end
-	if mode == "recipe" then
-		SetStatus(L["Scan done: %d recipes to learn among %d recipes listed."]:format(#view, listed))
-	else
-		SetStatus(L["Scan done: %d uncollected appearances among %d items of gear."]:format(#view, listed))
+		if mode == "recipe" then
+			SetStatus(L["Scan done: %d recipes to learn among %d recipes listed."]:format(#view, listed))
+		else
+			SetStatus(L["Scan done: %d uncollected appearances among %d items of gear."]:format(#view, listed))
+		end
 	end
 end
 
@@ -771,19 +1039,23 @@ local function StartScan()
 			return
 		end
 	end
+	asyncVerify.Cancel()
+	wipe(asyncVerify.failed)
 	wipe(buy)
 	wipe(scan)
 	scan.active, scan.phase, scan.t, scan.mode = true, "send", GetTime(), mode
-	scan.items, scan.pending, scan.seen, scan.listed, scan.read = {}, {}, {}, 0, 0
+	scan.items, scan.pending, scan.scratch, scan.seen, scan.listed, scan.read = {}, {}, {}, {}, 0, 0
 	SetStatus(mode == "recipe" and L["Scanning recipes …"] or L["Scanning weapons and armor …"])
+	SyncTicker()
 	Redraw()
 end
 
 -- the browse list is complete: ask for the next part, or finish
 local function Continue()
-	scan.t = GetTime()
+	local now = GetTime()
+	scan.t = now
 	if AH.HasFullBrowseResults() then
-		scan.phase, scan.loadT, scan.progressT = "loading", GetTime(), GetTime()
+		scan.phase, scan.loadT, scan.progressT, scan.loadNextT = "loading", now, now, 0
 	else
 		scan.phase = "more"
 	end
@@ -791,33 +1063,53 @@ local function Continue()
 end
 
 local function ScanTick(now)
-	local ready = AH.IsThrottledMessageSystemReady()
 	if scan.phase == "send" then
-		if ready or now - scan.t > 10 then
+		if AH.IsThrottledMessageSystemReady() or now - scan.t > 10 then
 			scan.phase, scan.t = "wait", now
 			AH.SendBrowseQuery(BrowseQuery())
 		end
 	elseif scan.phase == "more" then
-		if ready or now - scan.t > 10 then
+		if AH.IsThrottledMessageSystemReady() or now - scan.t > 10 then
 			scan.phase, scan.t = "wait", now
 			AH.RequestMoreBrowseResults()
 		end
 	elseif scan.phase == "wait" then
 		if now - scan.t > SCAN_WAIT then
 			-- no answer: use what arrived, if anything
-			if scan.read > 0 then scan.phase, scan.loadT, scan.progressT = "loading", now, now else FinishScan(true) end
+			if scan.read > 0 then
+				scan.phase, scan.loadT, scan.progressT, scan.loadNextT = "loading", now, now, 0
+			else
+				FinishScan(true)
+			end
 		end
 	elseif scan.phase == "loading" then
-		-- items whose data had not loaded yet
-		local still = {}
-		for _, result in ipairs(scan.pending) do
-			if not Record(result) then still[#still + 1] = result end
+		-- items whose data had not loaded yet, throttled and frame-budgeted
+		if scan.pending[1] then
+			if now < (scan.loadNextT or 0) then return end
+			local pending = scan.pending
+			local still = scan.scratch
+			wipe(still)
+			local stop = debugprofilestop() + 4
+			local n = #pending
+			local finishedPass = true
+			for i = 1, n do
+				if i > 1 and debugprofilestop() >= stop then
+					for j = i, n do still[#still + 1] = pending[j] end
+					finishedPass = false
+					break
+				end
+				if not Record(pending[i]) then still[#still + 1] = pending[i] end
+			end
+			if #still < n then scan.progressT = now end
+			scan.pending, scan.scratch = still, pending
+			wipe(pending)
+			if finishedPass and still[1] then scan.loadNextT = now + 0.35 end
+			if still[1] and now - scan.loadT < 60 and now - scan.progressT < INFO_WAIT then
+				SetStatus(L["Loading item data (%d left) …"]:format(#still))
+				return
+			end
 		end
-		if #still < #scan.pending then scan.progressT = now end
-		scan.pending = still
-		if still[1] and now - scan.loadT < 60 and now - scan.progressT < INFO_WAIT then
-			SetStatus(L["Loading item data (%d left) …"]:format(#still))
-		elseif scan.mode == "recipe" then
+		if scan.mode == "recipe" then
 			-- recipes: ask each tooltip whether it is known and can be learned
 			scan.phase, scan.verify, scan.vi = "verify", {}, 0
 			local knownCache = RecipeKnownCache()
@@ -831,14 +1123,13 @@ local function ScanTick(now)
 			scan.shownAt = now
 			dirty = true
 		else
-			-- Looks the tooltip already called known (or known through another item) stay
-			-- so: only the rest is asked. The list shows up right away and fills while
-			-- the check runs; rows still being checked are left out until they are done.
+			-- Items the tooltip already called known stay so: only the rest is asked.
+			-- The list shows up right away and fills while the check runs; rows still
+			-- being checked are left out until they are done.
 			scan.phase, scan.verify, scan.vi, scan.cached = "verify", {}, 0, 0
 			for _, e in pairs(scan.items) do
-				local c = db.tipCache[e.id]
-				if c then
-					e.tip, scan.cached = c, scan.cached + 1
+				if db.tipCache[e.id] == "known" then
+					e.tip, scan.cached = "known", scan.cached + 1
 				else
 					e.pending = true
 					scan.verify[#scan.verify + 1] = e
@@ -848,9 +1139,10 @@ local function ScanTick(now)
 			scan.shownAt = now
 			dirty = true
 		end
+		if ui and ui:IsShown() and UpdateBuyButton then UpdateBuyButton() end
 	elseif scan.phase == "verify" then
-		-- ask the game's tooltip, about 8 ms per tick so the frame rate holds
-		local stop = debugprofilestop() + 8
+		-- ask the game's tooltip, about 3.5 ms per frame so frame pacing stays smooth
+		local stop = debugprofilestop() + 3.5
 		local list = scan.verify
 		local recipes = scan.mode == "recipe"
 		while scan.vi < #list and debugprofilestop() < stop do
@@ -870,12 +1162,15 @@ local function ScanTick(now)
 			-- the list grows while the check runs, without moving the row being bought
 			scan.shownAt = now
 			dirty = true
-			Redraw()
+			if not buy.state then Redraw() end
 		end
 		if scan.vi >= #list and recipes then
 			local knownCache = RecipeKnownCache()
 			for _, e in ipairs(list) do
 				if e.rs and e.rs.known then knownCache[e.id] = true end
+			end
+			for k, e in pairs(scan.items) do
+				if knownCache[e.id] or (e.rs and e.rs.known) then scan.items[k] = nil end
 			end
 			FinishScan()
 		elseif scan.vi >= #list then
@@ -890,9 +1185,13 @@ local function ScanTick(now)
 				for _, e in ipairs(list) do e.tip = nil end
 				db.tipFallback = true
 			else
-				-- remember the settled verdicts: a collected look never becomes uncollected
+				-- remember only settled "known" verdicts (never permanently cache "other")
 				for _, e in ipairs(list) do
-					if e.tip == "known" or e.tip == "other" then db.tipCache[e.id] = e.tip end
+					if e.tip == "known" then db.tipCache[e.id] = "known" end
+				end
+				-- prune already-known items (keep "other" for completionist mode)
+				for k, e in pairs(scan.items) do
+					if e.tip == "known" then scan.items[k] = nil end
 				end
 			end
 			FinishScan()
@@ -922,6 +1221,7 @@ local function Check(e, pause, tried)
 	buy.plain = keyStyle[e.id] == "plain" or not e.key
 	buy.key = ItemKey(e, buy.plain)
 	SetStatus(L["Checking %s …"]:format(e.link or e.name or "?"))
+	SyncTicker()
 	Redraw()
 end
 
@@ -959,18 +1259,25 @@ local function ReadOffer()
 		Log("no results for %s, asking again", tostring(e.name))
 		return
 	end
+	local recipe = e.kind == "recipe"
 	for i = 1, total do
 		local info = AH.GetItemSearchResultInfo(key, i)
-		if info and info.auctionID and (info.buyoutAmount or 0) > 0 and not info.containsOwnerItem
-			and not buy.tried[info.auctionID] then
-			local recipe = e.kind == "recipe"
-			local _, source
-			if not recipe then _, source = TC.GetItemInfo(info.itemLink or e.id) end
-			local visual = source and source ~= e.source and db.unique and select(2, pcall(TC.GetSourceInfo, source))
-			visual = type(visual) == "table" and visual.visualID
+		local buyout = info and info.buyoutAmount or 0
+		if info and info.auctionID and buyout > 0 and (not best or buyout < best.buyoutAmount)
+			and not info.containsOwnerItem and not buy.tried[info.auctionID] then
 			local sameItem = info.itemKey and info.itemKey.itemID == e.id
-			if sameItem or (not recipe and source and (source == e.source or (visual and visual == e.visual))) then
-				if not best or info.buyoutAmount < best.buyoutAmount then best = info end
+			if sameItem then
+				best = info
+			elseif not recipe then
+				local _, source = TC.GetItemInfo(info.itemLink or e.id)
+				if source then
+					if source == e.source then
+						best = info
+					elseif db.unique and e.visual then
+						local ok, sInfo = pcall(TC.GetSourceInfo, source)
+						if ok and type(sInfo) == "table" and sInfo.visualID == e.visual then best = info end
+					end
+				end
 			end
 		end
 	end
@@ -981,6 +1288,7 @@ local function ReadOffer()
 		-- the list keeps the scanned price: changing it here would re-sort the list and
 		-- move the row being bought away from the cursor
 		SetStatus(L["%s for %s. Click Buy."]:format(buy.link, Money(buy.price)))
+		SyncTicker()
 	elseif not buy.plain then
 		-- the key built from the item link found nothing: the plain item key may be the one in use
 		buy.plain, buy.key, buy.state, buy.t, buy.retried = true, ItemKey(e, true), "send", GetTime(), nil
@@ -997,6 +1305,7 @@ local function ReadOffer()
 			Check(nextOne)
 			return
 		end
+		SyncTicker()
 	end
 	Redraw()
 end
@@ -1021,10 +1330,11 @@ local function BuyTick(now)
 		end
 	elseif buy.state == "buying" and buy.dbErrorAt and now - buy.dbErrorAt > 2 then
 		-- the "Internal auction error" was real this time: no confirmation came
-		ns.ShowError(Global("ERR_AUCTION_DATABASE_ERROR"))
-		ns.PurchaseFailed(Global("ERR_AUCTION_DATABASE_ERROR"), true)
+		ns.ShowError(ERR_DB_ERROR)
+		ns.PurchaseFailed(ERR_DB_ERROR, true)
 	elseif buy.state == "buying" and now - buy.t > 8 then
 		wipe(buy)
+		SyncTicker()
 		SetStatus(L["No confirmation from the auction house. Check your mail before buying again."])
 		Redraw()
 	end
@@ -1042,6 +1352,7 @@ local function Action()
 		if ns.ExpectDbError then ns.ExpectDbError() end
 		AH.PlaceBid(buy.auctionID, buy.price)
 		buy.state, buy.t = "buying", GetTime()
+		SyncTicker()
 		SetStatus(L["Buying %s …"]:format(buy.link))
 		Redraw()
 	elseif not buy.state then
@@ -1069,10 +1380,12 @@ local function Purchased(auctionID)
 	local nextOne = RemoveAndNext(e)
 	wipe(buy)
 	SaveScan()
-	Redraw()
 	if nextOne then
 		scrollTo = true
 		Check(nextOne, 0.5)
+	else
+		SyncTicker()
+		Redraw()
 	end
 end
 
@@ -1235,10 +1548,7 @@ local BOTTOM = 48  -- room under the list
 local rowsShown = 12
 
 local function SlotName(key)
-	for _, s in ipairs(SLOTS) do
-		if s[1] == key then return s[2] end
-	end
-	return SLOTS[1][2]
+	return SLOT_NAMES[key] or SLOTS[1][2]
 end
 
 -- A list to pick from under a button (our own: Blizzard's menu API did not open in Forever).
@@ -1251,6 +1561,12 @@ local function ShowPick(owner, list, current, onPick)
 		pick:EnableMouse(true)
 		Flat(pick, C.bg, C.line)
 		pick.rows = {}
+		pick.onEnter = function(self) self.hl:Show() end
+		pick.onLeave = function(self) self.hl:Hide() end
+		pick.onClick = function(self)
+			pick:Hide()
+			if pick.onPick then pick.onPick(self.key) end
+		end
 		pick:SetScript("OnUpdate", function(self)
 			if not self:IsMouseOver(40, -40, -40, 40) and not (self.owner and self.owner:IsMouseOver()) then self:Hide() end
 		end)
@@ -1261,6 +1577,7 @@ local function ShowPick(owner, list, current, onPick)
 		return
 	end
 	pick.owner = owner
+	pick.onPick = onPick
 	for i, item in ipairs(list) do
 		local b = pick.rows[i]
 		if not b then
@@ -1272,19 +1589,17 @@ local function ShowPick(owner, list, current, onPick)
 			b.hl:Hide()
 			b.fs = b:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 			b.fs:SetPoint("LEFT", 10, 0)
-			b:SetScript("OnEnter", function(self) self.hl:Show() end)
-			b:SetScript("OnLeave", function(self) self.hl:Hide() end)
+			b:SetScript("OnEnter", pick.onEnter)
+			b:SetScript("OnLeave", pick.onLeave)
+			b:SetScript("OnClick", pick.onClick)
 			pick.rows[i] = b
 		end
 		b:ClearAllPoints()
 		b:SetPoint("TOPLEFT", 4, -4 - (i - 1) * 20)
 		b:SetPoint("TOPRIGHT", -4, -4 - (i - 1) * 20)
+		b.key = item[1]
 		b.fs:SetText(item[2])
 		b.fs:SetTextColor(unpack(item[1] == current and C.accent or C.text))
-		b:SetScript("OnClick", function()
-			pick:Hide()
-			onPick(item[1])
-		end)
 		b:Show()
 	end
 	for i = #list + 1, #pick.rows do pick.rows[i]:Hide() end
@@ -1304,10 +1619,9 @@ local function ProfList()
 end
 
 local function ProfName(key)
-	for _, p in ipairs(ProfList()) do
-		if p[1] == key then return p[2] end
-	end
-	return L["All my professions"]
+	if key == "all" then return L["All my professions"] end
+	local p = MyProfessions()[key]
+	return (p and p.name) or L["All my professions"]
 end
 
 local function ShowSlotMenu(owner)
@@ -1327,10 +1641,13 @@ end
 -- Switch between the appearance list and the recipe list. Each keeps its own scan.
 local function SetMode(m)
 	if m == mode or scan.active or buy.state == "buying" then return end
+	asyncVerify.Cancel()
+	wipe(asyncVerify.failed)
 	store[mode].items, store[mode].listed, store[mode].dataAt = items, listed, dataAt
 	mode, db.mode = m, m
 	items, listed, dataAt = store[m].items, store[m].listed, store[m].dataAt
 	wipe(buy)
+	SyncTicker()
 	selected = nil
 	profCache = nil
 	if m == "recipe" and db.recipeProf ~= "all" and not MyProfessions()[db.recipeProf] then db.recipeProf = "all" end
@@ -1340,10 +1657,7 @@ end
 ns.SetMode = SetMode
 
 local function ColorName(key)
-	for _, c in ipairs(COLORS) do
-		if c[1] == key then return c[2] end
-	end
-	return COLORS[1][2]
+	return COLOR_NAMES[key] or COLORS[1][2]
 end
 
 local function HideAppearance(e)
@@ -1351,6 +1665,7 @@ local function HideAppearance(e)
 	if selected == e then
 		selected = nil
 		wipe(buy)
+		SyncTicker()
 	end
 	Changed()
 	SetStatus(L["%s hidden. Settings bring hidden items back."]:format(e.link or e.name or "?"))
@@ -1487,7 +1802,7 @@ local function RowMenu(_, e)
 		rowMenu.title:SetWordWrap(false)
 		rowMenu.buttons = {}
 		local entries = {
-			{ L["Preview"], function(x) DressUpItemLink(x.link) end },
+			{ L["Preview"], function(x) if x.link then DressUpItemLink(x.link) end end },
 			{ L["Hide this appearance"], function(x) HideAppearance(x) end, L["Hide this recipe"] },
 			{ L["Wrong? Show diagnosis"], function(x) Diagnose(x) end },
 		}
@@ -1541,7 +1856,7 @@ local function UpdateScanButton()
 	end
 end
 
-local function UpdateBuyButton()
+UpdateBuyButton = function()
 	local b = ui.buy
 	if buy.state == "ready" then
 		b:SetText(L["Buy for %s"]:format(Money(buy.price)))
@@ -1563,19 +1878,8 @@ local HEADS = {
 	recipe = { name = L["Recipe"], price = L["Price"], count = L["Auctions"], level = L["Level"], type = L["Skill"], slot = L["Profession"] },
 }
 
-Redraw = function()
+local function RedrawRows()
 	if not ui or not ui:IsShown() then return end
-	if dirty then BuildView() end
-	if scrollTo and selected then
-		-- keep the item being bought in sight
-		scrollTo = false
-		for i, e in ipairs(view) do
-			if e == selected then
-				if i <= offset then offset = i - 1 elseif i > offset + rowsShown then offset = i - rowsShown end
-				break
-			end
-		end
-	end
 	UpdateScroll()
 	for i, row in ipairs(ui.rows) do
 		local e = i <= rowsShown and view[offset + i]
@@ -1583,7 +1887,11 @@ Redraw = function()
 		if e then
 			row.icon:SetTexture(e.icon)
 			local r, g, b = 1, 1, 1
-			local q = select(3, GetItemInfo(e.id)) or e.quality
+			local q = e.quality
+			if not q then
+				q = select(3, GetItemInfo(e.id))
+				e.quality = q
+			end
 			local qc = q and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[q]
 			if qc then r, g, b = qc.r, qc.g, qc.b end
 			row.name:SetText(e.name or e.link or "?")
@@ -1607,12 +1915,14 @@ Redraw = function()
 			row:Hide()
 		end
 	end
+end
+
+local function RedrawChrome()
 	local s = db.sort or { key = "price" }
 	local heads = HEADS[mode]
 	for key, h in pairs(ui.headers) do
 		h.text = heads[key] or h.text
 		h.label:SetTextColor(unpack(key == s.key and C.accent or C.gold))
-		h.arrow:Hide()
 		if key == s.key then
 			local arrow = s.desc and "|TInterface\\Buttons\\Arrow-Down-Up:12:12:0:-2|t" or "|TInterface\\Buttons\\Arrow-Up-Up:12:12:0:2|t"
 			h.label:SetText(h.text .. " " .. arrow)
@@ -1621,7 +1931,7 @@ Redraw = function()
 		end
 	end
 	local recipes = mode == "recipe"
-	if not next(items) and not scan.active then
+	if not dataAt and not scan.active then
 		ui.info:SetText(recipes and L["No scan yet. Click Scan: it reads the recipes of your professions only and takes a few seconds."]
 			or L["No scan yet. Click Scan: it reads weapons and armor only and takes a few seconds."])
 	elseif dataAt then
@@ -1631,7 +1941,7 @@ Redraw = function()
 		ui.info:SetText("")
 	end
 	ui.empty:SetText(recipes and L["No recipe left to learn with these filters."] or L["Nothing left to collect with these filters."])
-	ui.empty:SetShown(next(items) ~= nil and #view == 0 and not scan.active)
+	ui.empty:SetShown(dataAt ~= nil and #view == 0 and not scan.active)
 	ui.slot:SetText((recipes and ProfName(db.recipeProf) or SlotName(db.slot)) .. "  |cffa335eev|r")
 	ui.color:SetText(ColorName(db.color or "any") .. "  |cffa335eev|r")
 	ui.unique:Sync()
@@ -1653,6 +1963,23 @@ Redraw = function()
 	UpdateScanButton()
 	UpdateBuyButton()
 end
+
+Redraw = function()
+	if not ui or not ui:IsShown() then return end
+	if dirty and not buy.state then BuildView() end
+	if scrollTo and selected then
+		-- keep the item being bought in sight
+		scrollTo = false
+		for i, e in ipairs(view) do
+			if e == selected then
+				if i <= offset then offset = i - 1 elseif i > offset + rowsShown then offset = i - rowsShown end
+				break
+			end
+		end
+	end
+	RedrawRows()
+	RedrawChrome()
+end
 ns.Redraw = function() Redraw() end
 
 local function Layout()
@@ -1668,6 +1995,45 @@ local COLUMNS = {
 	{ "type", L["Type"], -270, 100, "LEFT" },
 	{ "slot", L["Slot"], -378, 100, "LEFT" },
 }
+
+-- Debounce typing in search and max-gold boxes (~0.18s) without per-keystroke closures.
+local debounce = { searchDue = 0, searchActive = false, maxDue = 0, maxActive = false }
+function debounce.ApplySearch()
+	debounce.searchDue = 0
+	if not ui or not ui.search then return end
+	local text = ui.search:GetText() or ""
+	if text ~= db.search then
+		db.search = text
+		Changed()
+	end
+end
+function debounce.OnSearch()
+	local left = debounce.searchDue - GetTime()
+	if left > 0.01 then
+		C_Timer.After(left, debounce.OnSearch)
+		return
+	end
+	debounce.searchActive = false
+	if debounce.searchDue > 0 then debounce.ApplySearch() end
+end
+function debounce.ApplyMax()
+	debounce.maxDue = 0
+	if not ui or not ui.maxBox then return end
+	local v = tonumber(ui.maxBox:GetText()) or 0
+	if v ~= db.maxGold then
+		db.maxGold = v
+		Changed()
+	end
+end
+function debounce.OnMax()
+	local left = debounce.maxDue - GetTime()
+	if left > 0.01 then
+		C_Timer.After(left, debounce.OnMax)
+		return
+	end
+	debounce.maxActive = false
+	if debounce.maxDue > 0 then debounce.ApplyMax() end
+end
 
 local function BuildUI()
 	if ui then return end
@@ -1697,11 +2063,21 @@ local function BuildUI()
 	search:SetPoint("LEFT", ui.scan, "RIGHT", 14, 0)
 	search:SetAutoFocus(false)
 	search:SetText(db.search or "")
+	search:HookScript("OnEnterPressed", debounce.ApplySearch)
 	search:HookScript("OnTextChanged", function(self)
 		local text = self:GetText() or ""
-		if text ~= db.search then
-			db.search = text
-			Changed()
+		if text == "" then
+			debounce.ApplySearch()
+			return
+		end
+		if text == db.search then
+			debounce.searchDue = 0
+			return
+		end
+		debounce.searchDue = GetTime() + 0.18
+		if not debounce.searchActive then
+			debounce.searchActive = true
+			C_Timer.After(0.18, debounce.OnSearch)
 		end
 	end)
 	ui.search = search
@@ -1721,15 +2097,29 @@ local function BuildUI()
 	maxBox:SetNumeric(true)
 	maxBox:SetMaxLetters(6)
 	maxBox:SetText((db.maxGold or 0) > 0 and tostring(db.maxGold) or "")
-	maxBox:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+	maxBox:SetScript("OnEnterPressed", function(self)
+		debounce.ApplyMax()
+		self:ClearFocus()
+	end)
 	maxBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
 	maxBox:HookScript("OnTextChanged", function(self)
-		local v = tonumber(self:GetText()) or 0
-		if v ~= db.maxGold then
-			db.maxGold = v
-			Changed()
+		local text = self:GetText() or ""
+		if text == "" then
+			debounce.ApplyMax()
+			return
+		end
+		local v = tonumber(text) or 0
+		if v == db.maxGold then
+			debounce.maxDue = 0
+			return
+		end
+		debounce.maxDue = GetTime() + 0.18
+		if not debounce.maxActive then
+			debounce.maxActive = true
+			C_Timer.After(0.18, debounce.OnMax)
 		end
 	end)
+	ui.maxBox = maxBox
 	Tip(maxBox, L["Max gold"], L["Hides items that cost more. Empty: no limit."])
 
 	local gear = FlatButton(ui, 24, 24)
@@ -1797,8 +2187,6 @@ local function BuildUI()
 		h.label:SetAllPoints()
 		h.label:SetText(text)
 		h.text = text
-		h.arrow = h:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-		h.arrow:SetTextColor(unpack(C.accent))
 		h:SetScript("OnClick", function()
 			local s = db.sort or {}
 			if s.key == key then
@@ -1822,10 +2210,7 @@ local function BuildUI()
 			h:SetPoint("TOPRIGHT", c[3], -4)
 		end)
 		h.label:SetJustifyH(c[5])
-		if c[5] == "RIGHT" then h.arrow:SetPoint("RIGHT", h, "LEFT", -2, 0) else h.arrow:SetPoint("LEFT", h, "LEFT", 44, 0) end
 	end
-	nameHead.arrow:ClearAllPoints()
-	nameHead.arrow:SetPoint("LEFT", nameHead, "LEFT", 34, 0)
 	local sep = list:CreateTexture(nil, "ARTWORK")
 	sep:SetColorTexture(C.line[1], C.line[2], C.line[3], 0.6)
 	sep:SetHeight(1)
@@ -1870,7 +2255,11 @@ local function BuildUI()
 			local e = self.e
 			if not e then return end
 			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-			GameTooltip:SetHyperlink(e.link)
+			if e.link then
+				GameTooltip:SetHyperlink(e.link)
+			else
+				GameTooltip:SetItemByID(e.id)
+			end
 			GameTooltip:AddLine(" ")
 			if e.kind == "recipe" then
 				GameTooltip:AddLine(L["Recipe not learned"], 0.80, 0.50, 1)
@@ -1896,9 +2285,9 @@ local function BuildUI()
 			elseif IsAltKeyDown() then
 				Diagnose(e)
 			elseif IsModifiedClick("DRESSUP") then
-				DressUpItemLink(e.link)
+				if e.link then DressUpItemLink(e.link) end
 			elseif IsModifiedClick("CHATLINK") then
-				ChatEdit_InsertLink(e.link)
+				if e.link then ChatEdit_InsertLink(e.link) end
 			else
 				Check(e)
 			end
@@ -1907,8 +2296,11 @@ local function BuildUI()
 	end
 	list:EnableMouseWheel(true)
 	list:SetScript("OnMouseWheel", function(_, delta)
-		offset = offset - delta * 3
-		Redraw()
+		local maxOffset = max(#view - rowsShown, 0)
+		local nextOffset = max(0, min(offset - delta * 3, maxOffset))
+		if nextOffset == offset then return end
+		offset = nextOffset
+		RedrawRows()
 	end)
 
 	local sb = CreateFrame("Slider", nil, list)
@@ -1927,8 +2319,11 @@ local function BuildUI()
 	sb:SetThumbTexture(thumb)
 	sb:SetScript("OnValueChanged", function(self, value)
 		if self.updating then return end
-		offset = floor(value + 0.5)
-		Redraw()
+		local maxOffset = max(#view - rowsShown, 0)
+		local nextOffset = max(0, min(floor(value + 0.5), maxOffset))
+		if nextOffset == offset then return end
+		offset = nextOffset
+		RedrawRows()
 	end)
 	ui.scrollBar = sb
 
@@ -1954,6 +2349,10 @@ local function BuildUI()
 	ui:SetScript("OnShow", function()
 		Layout()
 		Redraw()
+	end)
+	ui:SetScript("OnHide", function()
+		if pick then pick:Hide() end
+		if rowMenu then rowMenu:Hide() end
 	end)
 	ui:SetScript("OnSizeChanged", function()
 		Layout()
@@ -2069,8 +2468,9 @@ ns.ShowError = function(msg)
 	if UIErrorsFrame and msg then UIErrorsFrame:AddMessage(msg, 1, 0.1, 0.1, 1) end
 end
 local function OnErrorShown(_, msg)
+	if buy.state ~= "buying" then return end
 	if issecretvalue and issecretvalue(msg) then return end -- lines the game hides from addons
-	if msg == Global("ERR_AUCTION_DATABASE_ERROR") and GetTime() < hideDbErrorUntil and buy.state == "buying" then
+	if ERR_DB_ERROR and msg == ERR_DB_ERROR and GetTime() < hideDbErrorUntil then
 		hideDbErrorUntil = 0
 		UIErrorsFrame:Clear()
 	end
@@ -2081,6 +2481,45 @@ if UIErrorsFrame then
 end
 ns.ExpectDbError = function() hideDbErrorUntil = GetTime() + 1.5 end
 
+local function ClearPending(t)
+	if not t then return end
+	for _, e in pairs(t) do e.pending = nil end
+end
+
+local coalesce = { collection = false, recipes = false }
+function coalesce.FlushCollection()
+	coalesce.collection = false
+	wipe(known.src)
+	wipe(known.vis)
+	dirty = true
+	if ui and ui:IsShown() and not buy.state then Redraw() end
+end
+local function CollectionChanged()
+	if coalesce.collection then return end
+	coalesce.collection = true
+	C_Timer.After(0, coalesce.FlushCollection)
+end
+
+-- A recipe learned or a skill point gained: the recipes are asked again.
+function coalesce.FlushRecipes()
+	coalesce.recipes = false
+	profCache = nil
+	wipe(asyncVerify.failed)
+	local recipeItems = mode == "recipe" and items or store.recipe.items or {}
+	for _, e in pairs(recipeItems) do e.rs = nil end
+	if mode == "recipe" then
+		if asyncVerify.active and asyncVerify.mode == "recipe" then asyncVerify.Cancel() end
+		dirty = true
+		if ui and ui:IsShown() and not buy.state then Redraw() end
+	end
+end
+local function RecipesChanged()
+	if coalesce.recipes then return end
+	coalesce.recipes = true
+	C_Timer.After(0, coalesce.FlushRecipes)
+end
+ns.RecipesChanged = RecipesChanged
+
 function handlers.ADDON_LOADED(name)
 	if name ~= ADDON then return end
 	TransmogSweepDB = TransmogSweepDB or {}
@@ -2090,7 +2529,10 @@ function handlers.ADDON_LOADED(name)
 	end
 	db.hidden = db.hidden or {}
 	db.bought = db.bought or {}
-	db.tipCache = db.tipCache or {}  -- itemID -> "known" / "other": settled tooltip verdicts
+	db.tipCache = db.tipCache or {}  -- itemID -> "known": settled tooltip verdicts
+	for id, v in pairs(db.tipCache) do
+		if v ~= "known" then db.tipCache[id] = nil end
+	end
 	db.recipeKnown = db.recipeKnown or {} -- character -> itemID -> true: recipes already learned
 	db.lastFull = nil
 	local now = time()
@@ -2101,7 +2543,10 @@ function handlers.ADDON_LOADED(name)
 	local last = db.last
 	if last and last.v == 2 and last.items and now - (last.at or 0) < KEEP_SCAN then
 		items, listed, dataAt = last.items, last.listed or 0, last.at
-		for _, e in pairs(items) do e.pending = nil end
+		for _, e in pairs(items) do
+			e.pending = nil
+			e.nameLower = e.nameLower or (e.name or ""):lower()
+		end
 	else
 		db.last = nil
 	end
@@ -2109,7 +2554,10 @@ function handlers.ADDON_LOADED(name)
 	-- the last recipe scan, if it was this character's
 	local lr = db.lastRecipe
 	if lr and lr.v == 1 and lr.items and lr.char == CharKey() and now - (lr.at or 0) < KEEP_SCAN then
-		for _, e in pairs(lr.items) do e.pending, e.rs = nil, nil end -- asked again: skill may have changed
+		for _, e in pairs(lr.items) do
+			e.pending, e.rs = nil, nil -- asked again: skill may have changed
+			e.nameLower = e.nameLower or (e.name or ""):lower()
+		end
 		store.recipe.items, store.recipe.listed, store.recipe.dataAt = lr.items, lr.listed or 0, lr.at
 	else
 		db.lastRecipe = nil
@@ -2122,10 +2570,13 @@ function handlers.ADDON_LOADED(name)
 	end
 	local ok, err = pcall(RegisterSettings)
 	if not ok then Print(err) end
+	if events then events:UnregisterEvent("ADDON_LOADED") end
 end
 
 function handlers.AUCTION_HOUSE_SHOW()
 	ahOpen = true
+	if events then pcall(events.RegisterEvent, events, "UI_ERROR_MESSAGE") end
+	wipe(asyncVerify.failed)
 	store[mode].items, store[mode].listed, store[mode].dataAt = items, listed, dataAt
 	for m, st in pairs(store) do
 		if st.dataAt and time() - st.dataAt >= KEEP_SCAN then
@@ -2141,13 +2592,24 @@ end
 
 function handlers.AUCTION_HOUSE_CLOSED()
 	ahOpen = false
+	if events then pcall(events.UnregisterEvent, events, "UI_ERROR_MESSAGE") end
+	asyncVerify.Cancel()
+	debounce.searchDue, debounce.maxDue = 0, 0
 	wipe(buy)
 	selected = nil
+	ClearPending(items)
+	ClearPending(scan.items)
+	ClearPending(store.mog.items)
+	ClearPending(store.recipe.items)
+	if pick then pick:Hide() end
+	if rowMenu then rowMenu:Hide() end
 	if scan.active then
 		wipe(scan)
 		scan.active = false
+		dirty = true
 		SetStatus(L["Scan stopped: the auction house was closed."])
 	end
+	SyncTicker()
 end
 
 function handlers.AUCTION_HOUSE_BROWSE_RESULTS_UPDATED()
@@ -2193,7 +2655,7 @@ end
 local LEARN_PATTERN = ERR_LEARN_RECIPE_S and ("^" .. ERR_LEARN_RECIPE_S:gsub("([%(%)%.%+%-%*%?%[%]%^%$])", "%%%1"):gsub("%%s", ".+") .. "$")
 function handlers.CHAT_MSG_SYSTEM(msg)
 	if issecretvalue and issecretvalue(msg) then return end
-	if LEARN_PATTERN and type(msg) == "string" and msg:find(LEARN_PATTERN) then C_Timer.After(0.5, function() ns.RecipesChanged() end) end
+	if LEARN_PATTERN and type(msg) == "string" and msg:find(LEARN_PATTERN) then C_Timer.After(0.5, RecipesChanged) end
 	if ahOpen and type(msg) == "string" and msg:lower():find("auction") then Log("chat: %s", msg) end
 	WonMessage(msg)
 end
@@ -2211,78 +2673,79 @@ function handlers.AUCTION_HOUSE_SHOW_NOTIFICATION(note)
 	Log("AH notice %s", tostring(note))
 end
 
-local function CollectionChanged()
-	wipe(known.src)
-	wipe(known.vis)
-	dirty = true
-	if ui and ui:IsShown() then Redraw() end
-end
 handlers.TRANSMOG_COLLECTION_UPDATED = CollectionChanged
 function handlers.TRANSMOG_COLLECTION_SOURCE_ADDED(source)
 	local mogItems = mode == "mog" and items or store.mog.items or {}
 	local learned = source and mogItems[source]
-	if db and source then db.bought[source] = nil end
+	local itemID = learned and learned.id
+	local visualID = learned and learned.visual
+	if source and (not itemID or not visualID) then
+		local ok, info = pcall(TC.GetSourceInfo, source)
+		if ok and type(info) == "table" then
+			itemID = itemID or info.itemID
+			visualID = visualID or info.visualID
+		end
+	end
+	if db and source then
+		db.bought[source] = nil
+		if visualID then db.bought["v" .. visualID] = nil end
+		if itemID then db.tipCache[itemID] = "known" end
+	end
 	if learned then
-		if db then db.tipCache[learned.id] = "known" end
 		learned.tip = "known"
+		if not db.tipFallback and not buy.state then mogItems[source] = nil end
+	end
+	if visualID then
 		for _, e in pairs(mogItems) do
-			if e ~= learned and e.visual and e.visual == learned.visual and e.tip == "unknown" then e.tip = "other" end
+			if e.visual and e.visual == visualID and e.tip == "unknown" then e.tip = "other" end
 		end
 	end
 	CollectionChanged()
 end
 
--- A recipe learned or a skill point gained: the recipes are asked again.
-local function RecipesChanged()
-	profCache = nil
-	local recipeItems = mode == "recipe" and items or store.recipe.items or {}
-	for _, e in pairs(recipeItems) do e.rs = nil end
-	if mode == "recipe" then
-		dirty = true
-		if ui and ui:IsShown() then Redraw() end
-	end
-end
 handlers.NEW_RECIPE_LEARNED = RecipesChanged
 handlers.LEARNED_SPELL_IN_TAB = RecipesChanged
 handlers.SKILL_LINES_CHANGED = RecipesChanged
-ns.RecipesChanged = RecipesChanged
 
-local events = CreateFrame("Frame")
-for event in pairs(handlers) do
-	pcall(events.RegisterEvent, events, event)
-end
-events:SetScript("OnEvent", function(_, event, ...)
-	local ok, err = pcall(handlers[event], ...)
-	if not ok then Print(err) end
-end)
-
--- clock: ten ticks a second
-local elapsed, second = 0, 0
-events:SetScript("OnUpdate", function(_, dt)
-	elapsed = elapsed + dt
-	if elapsed < 0.1 then return end
-	second = second + elapsed
-	elapsed = 0
-	if not ahOpen then return end
-	local now = GetTime()
-	local ok, err = pcall(function()
-		if scan.active then
-			ScanTick(now)
-			if ui and ui:IsShown() then UpdateScanButton() end
-		end
-		if buy.state then BuyTick(now) end
-		if second >= 1 then
-			second = 0
-			if ui and ui:IsShown() then
-				UpdateScanButton()
-				UpdateBuyButton()
-			end
-		end
-	end)
-	if not ok then
-		Print(err)
-		wipe(scan)
-		scan.active = false
-		wipe(buy)
+do
+	events = CreateFrame("Frame")
+	events:Hide()
+	for event in pairs(handlers) do
+		if event ~= "UI_ERROR_MESSAGE" then pcall(events.RegisterEvent, events, event) end
 	end
-end)
+	events:SetScript("OnEvent", function(_, event, ...)
+		local ok, err = pcall(handlers[event], ...)
+		if not ok then Print(err) end
+	end)
+
+	local elapsed = 0
+	local function Tick(now, runBuy)
+		if scan.active then ScanTick(now) end
+		if runBuy and buy.state then BuyTick(now) end
+	end
+
+	events:SetScript("OnUpdate", function(_, dt)
+		if not SyncTicker() then
+			elapsed = 0
+			return
+		end
+		elapsed = elapsed + dt
+		local verify = scan.active and scan.phase == "verify"
+		local tick10 = elapsed >= 0.1
+		if not verify and not tick10 then return end
+		if tick10 then elapsed = 0 end
+		local now = GetTime()
+		local ok, err = pcall(Tick, now, tick10)
+		if not ok then
+			Print(err)
+			ClearPending(scan.items)
+			ClearPending(items)
+			wipe(scan)
+			scan.active = false
+			wipe(buy)
+			dirty = true
+			if ui and ui:IsShown() then Redraw() end
+		end
+		if not SyncTicker() then elapsed = 0 end
+	end)
+end
