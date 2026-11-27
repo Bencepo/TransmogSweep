@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Settings window: "More from Bencepo" button in the footer links to all Bencepo addons (BencepoUI 6).
+
 ## 1.2.2
 
 - Much faster and smoother scans and scrolling: idle `OnUpdate` sleeps outside active scans/purchases, tooltip scanning reads `C_TooltipInfo` directly without allocating temporary tables, verification runs in smooth 3.5 ms frame slices, search and max-gold inputs are debounced, scrolling only redraws visible rows, and already-collected items are pruned after verification to keep memory and SavedVariables small.

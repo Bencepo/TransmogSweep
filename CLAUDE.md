@@ -5,7 +5,7 @@ TransmogSweep: auction house tab for WoW Forever (modern C_AuctionHouse and C_Tr
 ## Layout
 
 - `TransmogSweep.lua`: everything (scan, collected checks, list, buying, window, settings, events).
-- `Libs/BencepoUI`: shared settings-window toolkit of all Bencepo addons; `opts.bugUrl` gives the "Report a bug" button. It must be the same file in each addon (canonical: minor 4, Nov 2026). Change it in one repo, bump the LibStub minor, copy it to the others: two different copies with the same minor make the result depend on load order.
+- `Libs/BencepoUI`: shared settings-window toolkit of all Bencepo addons; `opts.bugUrl` gives the "Report a bug" button. It must be the same file in each addon (canonical: minor 6, Nov 2026). Change it in one repo, bump the LibStub minor, copy it to the others: two different copies with the same minor make the result depend on load order.
 - `Libs/LibAHTab`: the auction house tab (same library as Auctionator and VendorFloor).
 - `media/logo.png`: project logo for CurseForge, Wago and the website (not packaged).
 
