@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.0
 
 - Minimap button (LibDBIcon), so minimap button collectors pick it up. It can be turned off in the settings.
 - Code cleanup, no change in behaviour.
