@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Minimap button (LibDBIcon), so minimap button collectors pick it up. It can be turned off in the settings.
 - Code cleanup, no change in behaviour.
 - Settings window: "More from Bencepo" button in the footer links to all Bencepo addons (BencepoUI 6).
 
