@@ -20,6 +20,10 @@ local GetMetadata = C_AddOns and C_AddOns.GetAddOnMetadata
 -- a global by name (game strings and frames that may not exist on every client)
 local function Global(name) return _G[name] end
 local floor, min, max = math.floor, math.min, math.max
+local format = string.format
+local tconcat, tremove, tsort = table.concat, table.remove, table.sort
+local ipairs, pairs, pcall, tostring, type, unpack, wipe = ipairs, pairs, pcall, tostring, type, unpack, wipe
+local GetTime = GetTime
 
 local VERSION = GetMetadata and GetMetadata(ADDON, "Version") or ""
 if VERSION == "" or VERSION:find("^@") then VERSION = "dev" end
@@ -80,9 +84,9 @@ local function Print(msg) print(PREFIX .. tostring(msg)) end
 -- What happened during the last purchases, for the diagnosis and bug reports.
 local log = {}
 local function Log(fmt, ...)
-	local ok, text = pcall(string.format, fmt, ...)
+	local ok, text = pcall(format, fmt, ...)
 	log[#log + 1] = ("%.2f  %s"):format(GetTime(), ok and text or fmt)
-	if #log > 60 then table.remove(log, 1) end
+	if #log > 60 then tremove(log, 1) end
 end
 ns.log = log
 
@@ -139,22 +143,25 @@ local ARMOR = {
 local SHIELD = { WARRIOR = true, PALADIN = true, SHAMAN = true }
 -- Weapon subclasses: 0 1h axe, 1 2h axe, 2 bow, 3 gun, 4 1h mace, 5 2h mace, 6 polearm,
 -- 7 1h sword, 8 2h sword, 10 staff, 13 fist, 15 dagger, 16 thrown, 18 crossbow, 19 wand
-local function set(...)
-	local t = {}
-	for _, v in ipairs({ ... }) do t[v] = true end
-	return t
+local WEAPONS
+do
+	local function set(...)
+		local t = {}
+		for i = 1, select("#", ...) do t[select(i, ...)] = true end
+		return t
+	end
+	WEAPONS = {
+		WARRIOR = set(0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 13, 15, 16, 18),
+		PALADIN = set(0, 1, 4, 5, 6, 7, 8),
+		HUNTER = set(0, 1, 2, 3, 6, 7, 8, 10, 13, 15, 16, 18),
+		ROGUE = set(2, 3, 4, 7, 13, 15, 16, 18),
+		PRIEST = set(4, 10, 15, 19),
+		SHAMAN = set(0, 1, 4, 5, 10, 13, 15),
+		MAGE = set(7, 10, 15, 19),
+		WARLOCK = set(7, 10, 15, 19),
+		DRUID = set(4, 5, 10, 13, 15),
+	}
 end
-local WEAPONS = {
-	WARRIOR = set(0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 13, 15, 16, 18),
-	PALADIN = set(0, 1, 4, 5, 6, 7, 8),
-	HUNTER = set(0, 1, 2, 3, 6, 7, 8, 10, 13, 15, 16, 18),
-	ROGUE = set(2, 3, 4, 7, 13, 15, 16, 18),
-	PRIEST = set(4, 10, 15, 19),
-	SHAMAN = set(0, 1, 4, 5, 10, 13, 15),
-	MAGE = set(7, 10, 15, 19),
-	WARLOCK = set(7, 10, 15, 19),
-	DRUID = set(4, 5, 10, 13, 15),
-}
 
 local classCache = { class = select(2, UnitClass("player")), can = {} }
 
@@ -261,17 +268,30 @@ end
 local TIP_UNKNOWN = Global("TRANSMOGRIFY_TOOLTIP_APPEARANCE_UNKNOWN") or "You haven't collected this appearance"
 local TIP_OTHER = Global("TRANSMOGRIFY_TOOLTIP_ITEM_UNKNOWN_APPEARANCE_KNOWN") or "You've collected this appearance, but not from this item"
 local TIP_KNOWN = Global("TRANSMOGRIFY_TOOLTIP_APPEARANCE_KNOWN")
----@type GameTooltip
-local scanTip
-local scanTipLeft = {}
+local OpenScanTip, GetScanTipLeft
+do
+	---@type GameTooltip
+	local scanTip
+	local scanTipLeft = {}
 
-local function GetScanTipLeft(i)
-	local fs = scanTipLeft[i]
-	if not fs then
-		fs = _G["TransmogSweepScanTipTextLeft" .. i]
-		scanTipLeft[i] = fs
+	OpenScanTip = function(itemID)
+		if not scanTip then
+			scanTip = CreateFrame("GameTooltip", "TransmogSweepScanTip", nil, "GameTooltipTemplate") --[[@as GameTooltip]]
+		end
+		scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
+		scanTip:ClearLines()
+		scanTip:SetItemByID(itemID)
+		return scanTip
 	end
-	return fs
+
+	GetScanTipLeft = function(i)
+		local fs = scanTipLeft[i]
+		if not fs then
+			fs = _G["TransmogSweepScanTipTextLeft" .. i]
+			scanTipLeft[i] = fs
+		end
+		return fs
+	end
 end
 
 local function IsRed(r, g, b) return (r and r > 0.9 and g < 0.25 and b < 0.25) and true or false end
@@ -301,18 +321,13 @@ local function ScanTipLines(itemID)
 			if lines[1] then return lines end
 		end
 	end
-	if not scanTip then
-		scanTip = CreateFrame("GameTooltip", "TransmogSweepScanTip", nil, "GameTooltipTemplate") --[[@as GameTooltip]]
-	end
-	scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
-	scanTip:ClearLines()
-	scanTip:SetItemByID(itemID)
-	for i = 1, scanTip:NumLines() do
+	local tip = OpenScanTip(itemID)
+	for i = 1, tip:NumLines() do
 		local fs = GetScanTipLeft(i)
 		local text = fs and fs:GetText()
 		if text then lines[#lines + 1] = { text, IsRed(fs:GetTextColor()) } end
 	end
-	scanTip:Hide()
+	tip:Hide()
 	return lines
 end
 
@@ -349,14 +364,9 @@ local function TipState(itemID)
 			if first then return "known" end
 		end
 	end
-	if not scanTip then
-		scanTip = CreateFrame("GameTooltip", "TransmogSweepScanTip", nil, "GameTooltipTemplate") --[[@as GameTooltip]]
-	end
-	scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
-	scanTip:ClearLines()
-	scanTip:SetItemByID(itemID)
+	local tip = OpenScanTip(itemID)
 	local result, first
-	for i = 1, scanTip:NumLines() do
+	for i = 1, tip:NumLines() do
 		local fs = GetScanTipLeft(i)
 		local text = fs and fs:GetText()
 		if text then
@@ -378,7 +388,7 @@ local function TipState(itemID)
 			end
 		end
 	end
-	scanTip:Hide()
+	tip:Hide()
 	if result then return result end
 	if not first or first == "" or first == RETRIEVING_ITEM_INFO then return nil end
 	return "known" -- loaded tooltip without a "not collected" line
@@ -424,37 +434,49 @@ end
 -- Recipes: the professions of this character, and what a recipe's tooltip says
 ---------------------------------------------------------------------------
 
--- recipe subclass (item class 9) of a profession skill line
-local SUB_OF_SKILL = { [165] = 1, [197] = 2, [202] = 3, [164] = 4, [185] = 5, [171] = 6, [129] = 7,
-	[333] = 8, [356] = 9, [755] = 10, [773] = 11 }
 local RECIPE_CLASS = Enum and Enum.ItemClass and Enum.ItemClass.Recipe or 9
-
 local profCache -- recipe subclass -> { name, rank, max }
-local function MyProfessions()
-	if profCache then return profCache end
-	local mine = {}
-	local byName = {}
-	for sub = 1, 11 do
+local MyProfessions
+do
+	-- recipe subclass (item class 9) of a profession skill line
+	local SUB_OF_SKILL = { [165] = 1, [197] = 2, [202] = 3, [164] = 4, [185] = 5, [171] = 6, [129] = 7,
+		[333] = 8, [356] = 9, [755] = 10, [773] = 11 }
+
+	local function AddProfessions(mine, byName, ...)
+		for i = 1, select("#", ...) do
+			local idx = select(i, ...)
+			if idx ~= nil then
+				local ok, name, _, rank, maxRank, _, _, skillLine = pcall(GetProfessionInfo, idx)
+				local sub = ok and (SUB_OF_SKILL[skillLine] or byName[name])
+				if sub then mine[sub] = { name = name, rank = rank or 0, max = maxRank or 0 } end
+			end
+		end
+	end
+
+	MyProfessions = function()
+		if profCache then return profCache end
+		local mine = {}
+		local byName = {}
 		local getSub = (C_Item and C_Item.GetItemSubClassInfo) or Global("GetItemSubClassInfo")
-		local name = getSub and getSub(RECIPE_CLASS, sub)
-		if name then byName[name] = sub end
-	end
-	if GetProfessions and GetProfessionInfo then
-		for _, idx in pairs({ GetProfessions() }) do
-			local ok, name, _, rank, maxRank, _, _, skillLine = pcall(GetProfessionInfo, idx)
-			local sub = ok and (SUB_OF_SKILL[skillLine] or byName[name])
-			if sub then mine[sub] = { name = name, rank = rank or 0, max = maxRank or 0 } end
+		if getSub then
+			for sub = 1, 11 do
+				local name = getSub(RECIPE_CLASS, sub)
+				if name then byName[name] = sub end
+			end
 		end
-	end
-	if not next(mine) and GetNumSkillLines and GetSkillLineInfo then
-		for i = 1, GetNumSkillLines() do
-			local name, isHeader, _, rank, _, _, maxRank = GetSkillLineInfo(i)
-			local sub = name and not isHeader and byName[name]
-			if sub then mine[sub] = { name = name, rank = rank or 0, max = maxRank or 0 } end
+		if GetProfessions and GetProfessionInfo then
+			AddProfessions(mine, byName, GetProfessions())
 		end
+		if not next(mine) and GetNumSkillLines and GetSkillLineInfo then
+			for i = 1, GetNumSkillLines() do
+				local name, isHeader, _, rank, _, _, maxRank = GetSkillLineInfo(i)
+				local sub = name and not isHeader and byName[name]
+				if sub then mine[sub] = { name = name, rank = rank or 0, max = maxRank or 0 } end
+			end
+		end
+		profCache = mine
+		return mine
 	end
-	profCache = mine
-	return mine
 end
 
 local KNOWN_TEXT = Global("ITEM_SPELL_KNOWN") or "Already known"
@@ -544,13 +566,8 @@ local function RecipeState(itemID)
 			end
 		end
 	end
-	if not scanTip then
-		scanTip = CreateFrame("GameTooltip", "TransmogSweepScanTip", nil, "GameTooltipTemplate") --[[@as GameTooltip]]
-	end
-	scanTip:SetOwner(WorldFrame, "ANCHOR_NONE")
-	scanTip:ClearLines()
-	scanTip:SetItemByID(itemID)
-	for i = 1, scanTip:NumLines() do
+	local tip = OpenScanTip(itemID)
+	for i = 1, tip:NumLines() do
 		local fs = GetScanTipLeft(i)
 		local text = fs and fs:GetText()
 		if text then
@@ -567,7 +584,7 @@ local function RecipeState(itemID)
 			if orr then otherRed = true end
 		end
 	end
-	scanTip:Hide()
+	tip:Hide()
 	if not st then return nil end
 	st.canLearn = not skillRed and not otherRed
 	return st
@@ -583,23 +600,24 @@ end
 -- The list
 ---------------------------------------------------------------------------
 
-local SORT_FIELDS = {
-	name = function(e) return e.nameLower or (e.name or ""):lower() end,
-	slot = function(e) return e.inv or e.profName or "" end,
-	type = function(e)
-		if e.kind == "recipe" then return e.rs and e.rs.skill or 0 end
-		return e.subName or ""
-	end,
-	level = function(e) return e.req or 0 end,
-	count = function(e) return e.n or 0 end,
-	price = function(e) return e.price or 0 end,
-}
+local SortView
+do
+	local SORT_FIELDS = {
+		name = function(e) return e.nameLower or (e.name or ""):lower() end,
+		slot = function(e) return e.inv or e.profName or "" end,
+		type = function(e)
+			if e.kind == "recipe" then return e.rs and e.rs.skill or 0 end
+			return e.subName or ""
+		end,
+		level = function(e) return e.req or 0 end,
+		count = function(e) return e.n or 0 end,
+		price = function(e) return e.price or 0 end,
+	}
+	local sortGet = SORT_FIELDS.price
+	local sortDesc = false
 
-local function SortView()
-	local s = db.sort or { key = "price" }
-	local get = SORT_FIELDS[s.key] or SORT_FIELDS.price
-	table.sort(view, function(a, b)
-		local x, y = get(a), get(b)
+	local function CompareView(a, b)
+		local x, y = sortGet(a), sortGet(b)
 		if x == y then
 			-- a fixed order for ties (same price, same slot …): the list must not reshuffle
 			-- between two builds, or "the next row" changes under the cursor
@@ -607,9 +625,17 @@ local function SortView()
 			if (a.name or "") ~= (b.name or "") then return (a.name or "") < (b.name or "") end
 			return a.source < b.source
 		end
-		if s.desc then return x > y end
+		if sortDesc then return x > y end
 		return x < y
-	end)
+	end
+
+	SortView = function()
+		local s = db.sort
+		local sKey = s and s.key or (not s and "price")
+		sortGet = SORT_FIELDS[sKey] or SORT_FIELDS.price
+		sortDesc = (s and s.desc) and true or false
+		tsort(view, CompareView)
+	end
 end
 
 -- WoW gives addons no colour of an item. The names do: "Crimson Silk Robe", "Black Mageweave
@@ -654,7 +680,7 @@ local function LookText(e)
 			end
 		end
 	end
-	t = " " .. table.concat(parts, " "):gsub("[^%a]", " ") .. " "
+	t = " " .. tconcat(parts, " "):gsub("[^%a]", " ") .. " "
 	lookNames[key] = t
 	return t
 end
@@ -880,19 +906,24 @@ ns.Changed = Changed
 -- Scan: one browse search for weapons and armor, grouped by item
 ---------------------------------------------------------------------------
 
-local function BrowseQuery()
-	local filters = {}
+local BrowseQuery
+do
+	local BROWSE_FILTERS = {}
 	for _, name in ipairs({ "PoorQuality", "CommonQuality", "UncommonQuality", "RareQuality", "EpicQuality", "LegendaryQuality" }) do
-		local v = Enum.AuctionHouseFilter and Enum.AuctionHouseFilter[name]
-		if v ~= nil then filters[#filters + 1] = v end
+		local v = Enum and Enum.AuctionHouseFilter and Enum.AuctionHouseFilter[name]
+		if v ~= nil then BROWSE_FILTERS[#BROWSE_FILTERS + 1] = v end
 	end
-	local classes = { { classID = 2 }, { classID = 4 } }
-	if scan.mode == "recipe" then
-		classes = {}
-		for sub in pairs(MyProfessions()) do classes[#classes + 1] = { classID = RECIPE_CLASS, subClassID = sub } end
+	local MOG_CLASSES = { { classID = 2 }, { classID = 4 } }
+
+	BrowseQuery = function()
+		local classes = MOG_CLASSES
+		if scan.mode == "recipe" then
+			classes = {}
+			for sub in pairs(MyProfessions()) do classes[#classes + 1] = { classID = RECIPE_CLASS, subClassID = sub } end
+		end
+		return { searchString = "", minLevel = 0, maxLevel = 0, filters = BROWSE_FILTERS,
+			itemClassFilters = classes, sorts = SORTS }
 	end
-	return { searchString = "", minLevel = 0, maxLevel = 0, filters = filters,
-		itemClassFilters = classes, sorts = SORTS }
 end
 
 local function KeyString(key)
@@ -1213,11 +1244,10 @@ end
 local function Check(e, pause, tried)
 	if not ahOpen or (scan.active and scan.phase ~= "verify") or buy.state == "buying" then return end
 	selected = e
+	local now = GetTime()
 	wipe(buy)
-	buy.pause, buy.keepTried = pause, tried
-	buy.e, buy.state, buy.t, buy.tried = e, "send", GetTime(), buy.keepTried or {}
-	buy.notBefore = buy.pause and (GetTime() + buy.pause) or nil
-	buy.keepTried, buy.pause = nil, nil
+	buy.e, buy.state, buy.t, buy.tried = e, "send", now, tried or {}
+	buy.notBefore = pause and (now + pause) or nil
 	buy.plain = keyStyle[e.id] == "plain" or not e.key
 	buy.key = ItemKey(e, buy.plain)
 	SetStatus(L["Checking %s …"]:format(e.link or e.name or "?"))
@@ -1243,7 +1273,7 @@ local function RemoveAndNext(e)
 		BuildView()
 		return view[1]
 	end
-	table.remove(view, pos)
+	tremove(view, pos)
 	return view[pos] or view[#view]
 end
 
@@ -1524,13 +1554,21 @@ local function FlatToggle(parent, label, width, get, setter, tip)
 	return b
 end
 
-local function SmallTab()
-	if db.smallTab ~= nil then return db.smallTab end
-	local vf = Global("VendorFloorDB")
-	if vf and vf.smallTab ~= nil then return vf.smallTab end
-	local A = _G["Auctionator"]
-	local ok, small = pcall(function() return A.Config.Get(A.Config.Options.SMALL_TABS) end)
-	return ok and small and true or false
+local SmallTab
+do
+	local function AuctionatorSmallTab(A)
+		return A.Config.Get(A.Config.Options.SMALL_TABS)
+	end
+
+	SmallTab = function()
+		if db.smallTab ~= nil then return db.smallTab end
+		local vf = Global("VendorFloorDB")
+		if vf and vf.smallTab ~= nil then return vf.smallTab end
+		local A = _G["Auctionator"]
+		if not A then return false end
+		local ok, small = pcall(AuctionatorSmallTab, A)
+		return ok and small and true or false
+	end
 end
 
 local tabButton
@@ -1583,6 +1621,8 @@ local function ShowPick(owner, list, current, onPick)
 		if not b then
 			b = CreateFrame("Button", nil, pick)
 			b:SetHeight(20)
+			b:SetPoint("TOPLEFT", 4, -4 - (i - 1) * 20)
+			b:SetPoint("TOPRIGHT", -4, -4 - (i - 1) * 20)
 			b.hl = b:CreateTexture(nil, "BACKGROUND")
 			b.hl:SetAllPoints()
 			b.hl:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 0.25)
@@ -1594,16 +1634,13 @@ local function ShowPick(owner, list, current, onPick)
 			b:SetScript("OnClick", pick.onClick)
 			pick.rows[i] = b
 		end
-		b:ClearAllPoints()
-		b:SetPoint("TOPLEFT", 4, -4 - (i - 1) * 20)
-		b:SetPoint("TOPRIGHT", -4, -4 - (i - 1) * 20)
 		b.key = item[1]
 		b.fs:SetText(item[2])
 		b.fs:SetTextColor(unpack(item[1] == current and C.accent or C.text))
 		b:Show()
 	end
 	for i = #list + 1, #pick.rows do pick.rows[i]:Hide() end
-	pick:SetSize(math.max(owner:GetWidth(), 170), #list * 20 + 8)
+	pick:SetSize(max(owner:GetWidth(), 170), #list * 20 + 8)
 	pick:ClearAllPoints()
 	pick:SetPoint("TOPLEFT", owner, "BOTTOMLEFT", 0, -2)
 	pick:Show()
@@ -1688,12 +1725,12 @@ local function Diagnose(e)
 				for k, x in pairs(v) do
 					if type(x) ~= "table" then t[#t + 1] = k .. "=" .. tostring(x) end
 				end
-				table.sort(t)
-				text = "{" .. table.concat(t, ", ") .. "}"
+				tsort(t)
+				text = "{" .. tconcat(t, ", ") .. "}"
 			end
 			parts[#parts + 1] = text
 		end
-		return #parts > 0 and table.concat(parts, " | ") or "nil"
+		return #parts > 0 and tconcat(parts, " | ") or "nil"
 	end
 	add("TransmogSweep %s  ·  %s", VERSION, (GetLocale and GetLocale()) or "?")
 	add("item %s  %s", tostring(e.id), tostring(e.name))
@@ -1711,7 +1748,7 @@ local function Diagnose(e)
 		end
 		add("purchase log:")
 		for _, line in ipairs(log) do add("  %s", line) end
-		return ns.ShowDiag(table.concat(out, "\n"))
+		return ns.ShowDiag(tconcat(out, "\n"))
 	end
 	add("entry source=%s visual=%s tip=%s tipFallback=%s unique=%s", tostring(e.source), tostring(e.visual), tostring(e.tip), tostring(db.tipFallback), tostring(db.unique))
 	add("GetItemInfo(id): %s", call(TC.GetItemInfo, e.id))
@@ -1746,7 +1783,7 @@ local function Diagnose(e)
 	for _, line in ipairs(TipLines(e.id)) do add("  %s", line:gsub("|", "||")) end
 	add("purchase log:")
 	for _, line in ipairs(log) do add("  %s", line) end
-	ns.ShowDiag(table.concat(out, "\n"))
+	ns.ShowDiag(tconcat(out, "\n"))
 end
 
 function ns.ShowDiag(text)
@@ -1918,13 +1955,15 @@ local function RedrawRows()
 end
 
 local function RedrawChrome()
-	local s = db.sort or { key = "price" }
+	local s = db.sort
+	local sKey = s and s.key or (not s and "price")
+	local sDesc = s and s.desc
 	local heads = HEADS[mode]
 	for key, h in pairs(ui.headers) do
 		h.text = heads[key] or h.text
-		h.label:SetTextColor(unpack(key == s.key and C.accent or C.gold))
-		if key == s.key then
-			local arrow = s.desc and "|TInterface\\Buttons\\Arrow-Down-Up:12:12:0:-2|t" or "|TInterface\\Buttons\\Arrow-Up-Up:12:12:0:2|t"
+		h.label:SetTextColor(unpack(key == sKey and C.accent or C.gold))
+		if key == sKey then
+			local arrow = sDesc and "|TInterface\\Buttons\\Arrow-Down-Up:12:12:0:-2|t" or "|TInterface\\Buttons\\Arrow-Up-Up:12:12:0:2|t"
 			h.label:SetText(h.text .. " " .. arrow)
 		else
 			h.label:SetText(h.text)
@@ -2376,82 +2415,87 @@ end
 -- Settings: a window of its own, live while you play
 ---------------------------------------------------------------------------
 
-local function CountKeys(t)
-	local n = 0
-	for _ in pairs(t) do n = n + 1 end
-	return n
-end
+local RegisterSettings
+do
+	local function CountKeys(t)
+		local n = 0
+		for _ in pairs(t) do n = n + 1 end
+		return n
+	end
 
-local function BuildSettings()
-	local UI = _G.LibStub("BencepoUI-1.0")
-	settingsWin = UI:CreateWindow({
-		name = "TransmogSweepSettingsFrame", title = L["TransmogSweep Settings"],
-		subtitle = VERSION, width = 470, height = 360, theme = C, accent = C.accent,
-		db = db, posKey = "settingsPoint", hint = L["drag to move, changes apply live"],
-		bugUrl = BUG_URL,
-	})
-	local w = settingsWin
-	local X = 16
-	w:Header(X, -48, L["List"])
-	w:Check(X, -72, L["Unique appearances"], L["One row per look, the cheapest item that has it. Looks you know through another item are hidden."],
-		function() return db.unique end, function(v) db.unique = v and true or false Changed() end)
-	w:Check(X, -96, L["Usable by my class"], L["Only armor types and weapons your class can wear."],
-		function() return db.classOnly end, function(v) db.classOnly = v and true or false Changed() end)
-	w:Check(X, -120, L["Hide items above my level"], L["Hides items your character cannot wear yet. Off by default: buying and selling to a vendor learns the look at any level."],
-		function() return db.aboveLevel end, function(v) db.aboveLevel = v and true or false Changed() end)
-	w:Check(X, -144, L["Hide what I bought"], L["Bought appearances stay hidden until you learn them (wear the item or sell it to a vendor), at most two weeks."],
-		function() return db.hideBought end, function(v) db.hideBought = v and true or false Changed() end)
+	local function BuildSettings()
+		local UI = _G.LibStub("BencepoUI-1.0")
+		settingsWin = UI:CreateWindow({
+			name = "TransmogSweepSettingsFrame", title = L["TransmogSweep Settings"],
+			subtitle = VERSION, width = 470, height = 360, theme = C, accent = C.accent,
+			db = db, posKey = "settingsPoint", hint = L["drag to move, changes apply live"],
+			bugUrl = BUG_URL,
+		})
+		local w = settingsWin
+		local X = 16
+		w:Header(X, -48, L["List"])
+		w:Check(X, -72, L["Unique appearances"], L["One row per look, the cheapest item that has it. Looks you know through another item are hidden."],
+			function() return db.unique end, function(v) db.unique = v and true or false Changed() end)
+		w:Check(X, -96, L["Usable by my class"], L["Only armor types and weapons your class can wear."],
+			function() return db.classOnly end, function(v) db.classOnly = v and true or false Changed() end)
+		w:Check(X, -120, L["Hide items above my level"], L["Hides items your character cannot wear yet. Off by default: buying and selling to a vendor learns the look at any level."],
+			function() return db.aboveLevel end, function(v) db.aboveLevel = v and true or false Changed() end)
+		w:Check(X, -144, L["Hide what I bought"], L["Bought appearances stay hidden until you learn them (wear the item or sell it to a vendor), at most two weeks."],
+			function() return db.hideBought end, function(v) db.hideBought = v and true or false Changed() end)
 
-	w:Header(X, -184, L["Auction house"])
-	w:Check(X, -208, L["Small tab"], L["Makes the TransmogSweep tab as narrow as its text. Unset, it follows VendorFloor or Auctionator."],
-		function() return SmallTab() end, function(v)
-			db.smallTab = v and true or false
-			SizeTab()
+		w:Header(X, -184, L["Auction house"])
+		w:Check(X, -208, L["Small tab"], L["Makes the TransmogSweep tab as narrow as its text. Unset, it follows VendorFloor or Auctionator."],
+			function() return SmallTab() end, function(v)
+				db.smallTab = v and true or false
+				SizeTab()
+			end)
+
+		local unhide = w:Button(L["Show hidden appearances"], 200, function()
+			wipe(db.hidden)
+			Changed()
+		end, L["Brings back every appearance you hid with a right-click."])
+		unhide:SetPoint("TOPLEFT", 250, -72)
+		local forget = w:Button(L["Forget purchases"], 200, function()
+			wipe(db.bought)
+			Changed()
+		end, L["Lists bought appearances again, e.g. if you sold an item before learning it."])
+		forget:SetPoint("TOPLEFT", 250, -106)
+		w:OnRefresh(function()
+			unhide:SetText(L["Show hidden appearances"] .. " (" .. CountKeys(db.hidden) .. ")")
 		end)
 
-	local unhide = w:Button(L["Show hidden appearances"], 200, function()
-		wipe(db.hidden)
-		Changed()
-	end, L["Brings back every appearance you hid with a right-click."])
-	unhide:SetPoint("TOPLEFT", 250, -72)
-	local forget = w:Button(L["Forget purchases"], 200, function()
-		wipe(db.bought)
-		Changed()
-	end, L["Lists bought appearances again, e.g. if you sold an item before learning it."])
-	forget:SetPoint("TOPLEFT", 250, -106)
-	w:OnRefresh(function()
-		unhide:SetText(L["Show hidden appearances"] .. " (" .. CountKeys(db.hidden) .. ")")
-	end)
+		w:Header(250, -150, L["Recipes"])
+		w:Check(250, -174, L["Learnable now"], L["Only recipes your character can learn right now: skill, level and other requirements met."],
+			function() return db.learnableOnly end, function(v) db.learnableOnly = v and true or false Changed() end)
 
-	w:Header(250, -150, L["Recipes"])
-	w:Check(250, -174, L["Learnable now"], L["Only recipes your character can learn right now: skill, level and other requirements met."],
-		function() return db.learnableOnly end, function(v) db.learnableOnly = v and true or false Changed() end)
-
-	w:Text(X, -250, L["Appearances count account-wide: a look learned on any of your characters is known. Recipes count per character, for the professions it has. Buying is always a click of your own."], 430)
-end
-
-function ns.ToggleSettings()
-	if not settingsWin then BuildSettings() end
-	settingsWin:Refresh()
-	settingsWin:Toggle()
-end
-
-function TransmogSweep_OnCompartmentClick()
-	ns.ToggleSettings()
-end
-
-local function RegisterSettings()
-	if not (Settings and Settings.RegisterVerticalLayoutCategory and Settings.RegisterAddOnCategory) then return end
-	local category, layout = Settings.RegisterVerticalLayoutCategory("TransmogSweep")
-	if layout and CreateSettingsButtonInitializer then
-		layout:AddInitializer(CreateSettingsButtonInitializer(L["TransmogSweep has its own settings window"], L["Open"], function()
-			if SettingsPanel and SettingsPanel:IsShown() then HideUIPanel(SettingsPanel) end
-			if not settingsWin then BuildSettings() end
-			settingsWin:Refresh()
-			settingsWin:Show()
-		end, L["The window can be dragged anywhere and stays open while you play."], true))
+		w:Text(X, -250, L["Appearances count account-wide: a look learned on any of your characters is known. Recipes count per character, for the professions it has. Buying is always a click of your own."], 430)
 	end
-	Settings.RegisterAddOnCategory(category)
+
+	local function EnsureSettings()
+		if not settingsWin then BuildSettings() end
+		settingsWin:Refresh()
+		return settingsWin
+	end
+
+	function ns.ToggleSettings()
+		EnsureSettings():Toggle()
+	end
+
+	function TransmogSweep_OnCompartmentClick()
+		ns.ToggleSettings()
+	end
+
+	RegisterSettings = function()
+		if not (Settings and Settings.RegisterVerticalLayoutCategory and Settings.RegisterAddOnCategory) then return end
+		local category, layout = Settings.RegisterVerticalLayoutCategory("TransmogSweep")
+		if layout and CreateSettingsButtonInitializer then
+			layout:AddInitializer(CreateSettingsButtonInitializer(L["TransmogSweep has its own settings window"], L["Open"], function()
+				if SettingsPanel and SettingsPanel:IsShown() then HideUIPanel(SettingsPanel) end
+				EnsureSettings():Show()
+			end, L["The window can be dragged anywhere and stays open while you play."], true))
+		end
+		Settings.RegisterAddOnCategory(category)
+	end
 end
 
 ---------------------------------------------------------------------------
