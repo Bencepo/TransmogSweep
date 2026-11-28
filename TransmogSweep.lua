@@ -44,6 +44,7 @@ local defaults = {
 	classOnly = false,   -- only items your class can wear
 	aboveLevel = false,  -- hide items above your level
 	hideBought = true,   -- hide appearances bought until they are learned
+	showMinimap = true,
 	slot = "all",
 	color = "any",
 	maxGold = 0,         -- 0: no price limit
@@ -2415,8 +2416,16 @@ end
 -- Settings: a window of its own, live while you play
 ---------------------------------------------------------------------------
 
-local RegisterSettings
+local RegisterMinimap, RegisterSettings
 do
+	local LDBIcon
+
+	local function ApplyMinimap()
+		if not LDBIcon then return end
+		db.minimap.hide = not db.showMinimap
+		if db.showMinimap then LDBIcon:Show(ADDON) else LDBIcon:Hide(ADDON) end
+	end
+
 	local function CountKeys(t)
 		local n = 0
 		for _ in pairs(t) do n = n + 1 end
@@ -2468,7 +2477,11 @@ do
 		w:Check(250, -174, L["Learnable now"], L["Only recipes your character can learn right now: skill, level and other requirements met."],
 			function() return db.learnableOnly end, function(v) db.learnableOnly = v and true or false Changed() end)
 
-		w:Text(X, -250, L["Appearances count account-wide: a look learned on any of your characters is known. Recipes count per character, for the professions it has. Buying is always a click of your own."], 430)
+		w:Header(250, -210, L["General"])
+		w:Check(250, -234, L["Minimap button"], L["Show the TransmogSweep button at the minimap."],
+			function() return db.showMinimap end, function(v) db.showMinimap = v and true or false ApplyMinimap() end)
+
+		w:Text(X, -276, L["Appearances count account-wide: a look learned on any of your characters is known. Recipes count per character, for the professions it has. Buying is always a click of your own."], 430)
 	end
 
 	local function EnsureSettings()
@@ -2483,6 +2496,27 @@ do
 
 	function TransmogSweep_OnCompartmentClick()
 		ns.ToggleSettings()
+	end
+
+	RegisterMinimap = function()
+		local LibStub = _G.LibStub
+		local LDB = LibStub and LibStub("LibDataBroker-1.1", true)
+		LDBIcon = LibStub and LibStub("LibDBIcon-1.0", true)
+		if not (LDB and LDBIcon) then return end
+		local obj = LDB:NewDataObject(ADDON, {
+			type = "launcher",
+			text = ADDON,
+			icon = "Interface\\AddOns\\TransmogSweep\\Icons\\minimap",
+			OnClick = function(_, button)
+				if button == "LeftButton" then TransmogSweep_OnCompartmentClick() end
+			end,
+			OnTooltipShow = function(tt)
+				tt:AddLine(ADDON)
+				tt:AddLine("|cffffffffLeft-click:|r settings", 0.8, 0.8, 0.8)
+			end,
+		})
+		db.minimap.hide = not db.showMinimap
+		LDBIcon:Register(ADDON, obj, db.minimap)
 	end
 
 	RegisterSettings = function()
@@ -2573,6 +2607,7 @@ function handlers.ADDON_LOADED(name)
 	end
 	db.hidden = db.hidden or {}
 	db.bought = db.bought or {}
+	db.minimap = db.minimap or {}
 	db.tipCache = db.tipCache or {}  -- itemID -> "known": settled tooltip verdicts
 	for id, v in pairs(db.tipCache) do
 		if v ~= "known" then db.tipCache[id] = nil end
@@ -2612,6 +2647,7 @@ function handlers.ADDON_LOADED(name)
 	else
 		db.mode = "mog"
 	end
+	RegisterMinimap()
 	local ok, err = pcall(RegisterSettings)
 	if not ok then Print(err) end
 	if events then events:UnregisterEvent("ADDON_LOADED") end
